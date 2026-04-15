@@ -117,7 +117,7 @@ def load_data_from_drive() -> dict:
 def get_data(force_refresh: bool = False) -> dict:
     global _cached_data, _cached_sales_df
 
-    has_creds = os.path.exists(os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json"))
+    has_creds = os.path.exists(os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")) or bool(os.getenv("GOOGLE_CREDENTIALS_JSON"))
 
     if force_refresh or _cached_data is None:
         if has_creds:
