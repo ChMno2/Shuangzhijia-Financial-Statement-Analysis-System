@@ -1,0 +1,27 @@
+# 敏感設定檔
+backend/.env
+backend/credentials.json
+
+# 資料庫（每次啟動從 Google Sheets 重新同步）
+backend/sales.db
+backend/reports.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+*.egg
+
+# Node.js
+frontend/node_modules/
+frontend/dist/
+
+# macOS
+.DS_Store
+
+# 文件暫存
+*.docx
+memory/
