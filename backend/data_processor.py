@@ -281,14 +281,31 @@ def get_profit_report(sales_df: pd.DataFrame, days: int = 30,
         # 合併成本（從有 _cost 的列）
         if has_cost and not cost_df.empty:
             agg_cost = {"_cost": "sum", "_sales": "sum"}
+            if "銷售數量" in cost_df.columns:
+                agg_cost["銷售數量"] = "sum"
             prod_cost = cost_df.groupby("品名").agg(agg_cost).reset_index()
-            prod_cost = prod_cost.rename(columns={"_cost": "cost", "_sales": "cost_revenue"})
+            prod_cost = prod_cost.rename(columns={"_cost": "cost", "_sales": "cost_revenue", "銷售數量": "cost_qty"})
             prod_all = prod_all.merge(prod_cost, on="品名", how="left")
 
             mask = prod_all["cost_revenue"].notna() & (prod_all["cost_revenue"] > 0)
-            prod_all.loc[mask, "profit"] = prod_all.loc[mask, "cost_revenue"] - prod_all.loc[mask, "cost"]
+            prod_all.loc[mask, "total_profit"] = (
+                prod_all.loc[mask, "cost_revenue"] - prod_all.loc[mask, "cost"]
+            ).round(0)
             prod_all.loc[mask, "margin"] = (
-                prod_all.loc[mask, "profit"] / prod_all.loc[mask, "cost_revenue"] * 100
+                prod_all.loc[mask, "total_profit"] / prod_all.loc[mask, "cost_revenue"] * 100
+            ).round(1)
+
+            # 單價 / 單位成本 / 每件毛利（用有成本資料的那批數量為準）
+            qty_col = "cost_qty" if "cost_qty" in prod_all.columns else "quantity"
+            mask_qty = mask & prod_all[qty_col].notna() & (prod_all[qty_col] > 0)
+            prod_all.loc[mask_qty, "unit_price"] = (
+                prod_all.loc[mask_qty, "cost_revenue"] / prod_all.loc[mask_qty, qty_col]
+            ).round(1)
+            prod_all.loc[mask_qty, "unit_cost"] = (
+                prod_all.loc[mask_qty, "cost"] / prod_all.loc[mask_qty, qty_col]
+            ).round(1)
+            prod_all.loc[mask_qty, "unit_profit"] = (
+                prod_all.loc[mask_qty, "unit_price"] - prod_all.loc[mask_qty, "unit_cost"]
             ).round(1)
 
         prod_all["revenue"] = prod_all["revenue"].round(0)

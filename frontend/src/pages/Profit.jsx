@@ -175,52 +175,58 @@ export default function Profit() {
               <div className="px-5 py-4 border-b border-slate-50">
                 <h3 className="font-semibold text-slate-700">商品利潤 TOP 20</h3>
               </div>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-slate-50 border-b border-slate-100">
-                    <th className="text-left px-5 py-3 text-slate-500 font-medium w-8">#</th>
-                    <th className="text-left px-5 py-3 text-slate-500 font-medium">商品名稱</th>
-                    <th className="text-left px-5 py-3 text-slate-500 font-medium">類別</th>
-                    <th className="text-right px-5 py-3 text-slate-500 font-medium">銷售額</th>
-                    {hasCost && <th className="text-right px-5 py-3 text-slate-500 font-medium">成本</th>}
-                    {hasCost && <th className="text-right px-5 py-3 text-slate-500 font-medium">毛利</th>}
-                    {hasCost && <th className="text-right px-5 py-3 text-slate-500 font-medium">毛利率</th>}
-                    <th className="text-right px-5 py-3 text-slate-500 font-medium">件數</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {prodData.map((p, i) => (
-                    <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
-                      <td className="px-5 py-2.5 text-slate-400 text-xs">{i + 1}</td>
-                      <td className="px-5 py-2.5 font-medium text-slate-800 max-w-[200px] truncate" title={p['品名']}>
-                        {p['品名']}
-                      </td>
-                      <td className="px-5 py-2.5">
-                        <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full text-xs">{p.category || '-'}</span>
-                      </td>
-                      <td className="px-5 py-2.5 text-right font-medium text-slate-800">{fmt(p.revenue)}</td>
-                      {hasCost && (
-                        <td className="px-5 py-2.5 text-right">
-                          {p.cost != null
-                            ? <span className="text-amber-600">{fmt(p.cost)}</span>
-                            : <span className="text-slate-300 text-xs">表單未填寫</span>}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[800px]">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-100">
+                      <th className="text-left px-4 py-3 text-slate-500 font-medium w-8">#</th>
+                      <th className="text-left px-4 py-3 text-slate-500 font-medium">商品名稱</th>
+                      <th className="text-left px-4 py-3 text-slate-500 font-medium">類別</th>
+                      <th className="text-right px-4 py-3 text-slate-500 font-medium">銷售單價</th>
+                      <th className="text-right px-4 py-3 text-slate-500 font-medium">銷售成本</th>
+                      <th className="text-right px-4 py-3 text-slate-500 font-medium">銷售毛利</th>
+                      <th className="text-right px-4 py-3 text-slate-500 font-medium">毛利率</th>
+                      <th className="text-right px-4 py-3 text-slate-500 font-medium">件數</th>
+                      <th className="text-right px-4 py-3 text-slate-500 font-medium">銷售總淨利</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {prodData.map((p, i) => (
+                      <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
+                        <td className="px-4 py-2.5 text-slate-400 text-xs">{i + 1}</td>
+                        <td className="px-4 py-2.5 font-medium text-slate-800 max-w-[180px] truncate" title={p['品名']}>
+                          {p['品名']}
                         </td>
-                      )}
-                      {hasCost && (
-                        <td className="px-5 py-2.5 text-right text-green-600 font-medium">
-                          {p.profit != null ? fmt(p.profit) : <span className="text-slate-300 text-xs">—</span>}
+                        <td className="px-4 py-2.5">
+                          <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full text-xs">{p.category || '-'}</span>
                         </td>
-                      )}
-                      {hasCost && (
-                        <td className="px-5 py-2.5 text-right">
+                        <td className="px-4 py-2.5 text-right text-slate-700">
+                          {p.unit_price != null ? fmt(p.unit_price) : <span className="text-slate-300 text-xs">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          {p.unit_cost != null
+                            ? <span className="text-amber-600">{fmt(p.unit_cost)}</span>
+                            : <span className="text-slate-300 text-xs">未填寫</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          {p.unit_profit != null
+                            ? <span className={p.unit_profit >= 0 ? 'text-green-600 font-medium' : 'text-red-500 font-medium'}>{fmt(p.unit_profit)}</span>
+                            : <span className="text-slate-300 text-xs">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
                           <MarginBadge value={p.margin} />
                         </td>
-                      )}
-                      <td className="px-5 py-2.5 text-right text-slate-600">{p.quantity ?? '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        <td className="px-4 py-2.5 text-right text-slate-600">{p.quantity ?? '-'}</td>
+                        <td className="px-4 py-2.5 text-right">
+                          {p.total_profit != null
+                            ? <span className={p.total_profit >= 0 ? 'text-green-700 font-semibold' : 'text-red-500 font-semibold'}>{fmt(p.total_profit)}</span>
+                            : <span className="text-slate-300 text-xs">—</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </>
