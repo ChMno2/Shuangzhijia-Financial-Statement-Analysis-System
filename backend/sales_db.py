@@ -164,10 +164,11 @@ def tool_query_sales(days=30, category=None, location=None, product=None,
         SELECT {group_cols},
                ROUND(SUM(revenue), 0) AS revenue,
                SUM(quantity)          AS quantity,
-               ROUND(AVG(
-                 CASE WHEN cost > 0 AND cost IS NOT NULL
-                      THEN (revenue - cost) / NULLIF(revenue, 0) * 100
-                 END), 1)             AS margin_pct,
+               ROUND(
+                 CASE WHEN SUM(CASE WHEN cost > 0 AND cost IS NOT NULL THEN revenue ELSE 0 END) > 0
+                      THEN (SUM(CASE WHEN cost > 0 AND cost IS NOT NULL THEN revenue - cost ELSE 0 END)
+                            / SUM(CASE WHEN cost > 0 AND cost IS NOT NULL THEN revenue ELSE 0 END)) * 100
+                 END, 1)              AS margin_pct,
                COUNT(*)               AS transactions
         FROM   sales
         WHERE  {where_str}
@@ -282,10 +283,11 @@ def tool_get_summary(days=30):
                COUNT(DISTINCT product)  AS unique_products,
                MIN(date)                AS from_date,
                MAX(date)                AS to_date,
-               ROUND(AVG(
-                 CASE WHEN cost > 0 AND cost IS NOT NULL
-                      THEN (revenue - cost) / NULLIF(revenue, 0) * 100
-                 END), 1)               AS avg_margin_pct
+               ROUND(
+                 CASE WHEN SUM(CASE WHEN cost > 0 AND cost IS NOT NULL THEN revenue ELSE 0 END) > 0
+                      THEN (SUM(CASE WHEN cost > 0 AND cost IS NOT NULL THEN revenue - cost ELSE 0 END)
+                            / SUM(CASE WHEN cost > 0 AND cost IS NOT NULL THEN revenue ELSE 0 END)) * 100
+                 END, 1)               AS avg_margin_pct
         FROM   sales WHERE date >= ?
     """, [cutoff]).fetchone())
 

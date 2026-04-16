@@ -191,11 +191,16 @@ def load_all_sales(xl: pd.ExcelFile, sheet_names: list) -> pd.DataFrame:
         # 都無資料則為 NaN（標記為表單未填寫）
         cost_series = pd.Series([float("nan")] * len(sales_df), index=sales_df.index)
 
-        # 1. 銷售成本（最新工作表格式）
+        # 1. 銷售成本（最新工作表格式）— 銷售成本為單位成本，需乘以銷售數量
         if "銷售成本" in sales_df.columns:
             v = pd.to_numeric(sales_df["銷售成本"], errors="coerce")
-            mask = v.notna() & (v > 0)
-            cost_series[mask] = v[mask]
+            if "銷售數量" in sales_df.columns:
+                qty = pd.to_numeric(sales_df["銷售數量"], errors="coerce")
+                calc = v * qty
+            else:
+                calc = v
+            mask = calc.notna() & (calc > 0)
+            cost_series[mask] = calc[mask]
 
         # 2. 進貨總成本（舊格式直接記錄總成本）
         if "進貨總成本" in sales_df.columns:
