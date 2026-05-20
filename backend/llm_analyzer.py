@@ -218,17 +218,28 @@ def analyze_with_llm(question: str, data: dict, chat_history: list = None) -> st
 
 
 def generate_weekly_report(data: dict) -> str:
-    """自動生成本週營業週報"""
+    """
+    自動生成本週營業週報（LINE 推送用）
+    產出規則：純文字、無 markdown 符號、語句精簡、最後給進貨建議。
+    """
     data_context = build_data_context(data)
 
-    prompt = f"""請根據以下資料，生成一份專業的本週營業週報，格式清晰，使用繁體中文。
+    prompt = f"""請根據以下資料生成本週營業週報，給 LINE 訊息使用。
 
-包含以下部分：
-1. 本週業績摘要（與上週比較）
-2. 暢銷商品 TOP 3 分析
-3. 各類別銷售表現
-4. 需要注意的問題（如庫存不足）
-5. 下週建議行動
+【格式限制 — 必須嚴格遵守】
+- 純文字輸出，不可使用任何 markdown 符號：禁用 # * _ ` > [] ()
+- 不要用 ** 或 __ 標記粗體 / 斜體（LINE 無法渲染）
+- 每段用阿拉伯數字 + 頓號當小標（例：1、本週業績）
+- 條列用「・」（中黑點）或數字編號，不要用 - 或 *
+- 一句話講完就好，不要解釋過程，不要寫「綜上所述」「整體而言」等贅字
+- 數字精確到個位並加千分位逗號（例：NT$ 167,280）
+- 全文控制在 600 字以內
+
+【內容結構】
+1、核心數據一覽（本週營收、月累計、週成長率、近30天交易筆數）
+2、銷售走勢（一兩句說明本週相對上週的趨勢與原因）
+3、TOP 3 商品摘要（商品名 + 銷售額 + 是否有特別現象）
+4、下週進貨建議（哪些品項該補、哪些可暫緩，每項一句話內含理由）
 
 資料：
 {data_context}
@@ -236,8 +247,17 @@ def generate_weekly_report(data: dict) -> str:
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=2000,
+        max_tokens=1500,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return response.content[0].text
+    text = response.content[0].text
+
+    # 雙重保險：即使模型違反指示，事後清掉常見 markdown 符號
+    import re
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)   # **bold**
+    text = re.sub(r'__(.+?)__', r'\1', text)       # __bold__
+    text = re.sub(r'(?m)^\s*[#>]+\s*', '', text)   # # heading / > quote
+    text = re.sub(r'(?m)^\s*[-\*]\s+', '・', text)  # - / * 條列符號
+    text = re.sub(r'`([^`]+)`', r'\1', text)       # `code`
+    return text.strip()

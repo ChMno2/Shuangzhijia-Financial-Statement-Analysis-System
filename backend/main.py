@@ -408,6 +408,67 @@ def refresh_data(user: str = Depends(get_current_user)):
     }
 
 
+@app.get("/api/line/daily")
+def line_daily_brief(user: str = Depends(get_current_user)):
+    """
+    LINE 每日速報專用 endpoint — 一次拿完所有必要資料：
+    - 最新一天的營收、淨利、毛利率
+    - 該日 TOP 3 商品 + 個別銷售金額
+    - 近 30 天累計營收 / 交易筆數
+    """
+    get_data()
+    if _cached_sales_df is None or _cached_sales_df.empty:
+        raise HTTPException(status_code=503, detail="尚無銷售資料")
+
+    df = _cached_sales_df
+    latest = df["_date"].max()
+    today_clamped = pd.Timestamp(datetime.today().date())
+    # 用「最新一筆資料的日期」當作「今天」（與儀表板邏輯一致，已夾在今天以內）
+    target_date = min(latest, today_clamped) if pd.notna(latest) else today_clamped
+
+    today_df = df[df["_date"].dt.date == target_date.date()]
+    today_revenue = float(today_df["_sales"].sum()) if not today_df.empty else 0.0
+
+    # 該日淨利（有成本資料才能算）
+    today_profit = None
+    today_margin = None
+    if "_cost" in today_df.columns:
+        cost_rows = today_df[today_df["_cost"].notna() & (today_df["_cost"] > 0)]
+        if not cost_rows.empty:
+            cost_total = float(cost_rows["_cost"].sum())
+            cost_basis_revenue = float(cost_rows["_sales"].sum())
+            today_profit = round(cost_basis_revenue - cost_total, 0)
+            if cost_basis_revenue > 0:
+                today_margin = round(
+                    (cost_basis_revenue - cost_total) / cost_basis_revenue * 100, 1
+                )
+
+    # 該日 TOP 3 商品
+    top3 = []
+    if "品名" in today_df.columns and not today_df.empty:
+        top = today_df.groupby("品名")["_sales"].sum().nlargest(3)
+        for name, rev in top.items():
+            top3.append({"name": str(name), "revenue": round(float(rev), 0)})
+
+    # 近 30 天累計（含今天）
+    from datetime import timedelta as _td
+    cutoff = target_date - _td(days=29)
+    last_30 = df[(df["_date"] >= cutoff) & (df["_date"] <= target_date)]
+    last_30_revenue = round(float(last_30["_sales"].sum()), 0) if not last_30.empty else 0.0
+    last_30_transactions = int(len(last_30))
+
+    return {
+        "date": str(target_date.date()),
+        "revenue": round(today_revenue, 0),
+        "profit": today_profit,
+        "margin": today_margin,
+        "top_products": top3,
+        "last_30_days_revenue": last_30_revenue,
+        "last_30_days_transactions": last_30_transactions,
+        "has_data": not today_df.empty,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)

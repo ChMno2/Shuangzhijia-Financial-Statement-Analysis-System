@@ -1,31 +1,29 @@
-name: LINE 雙之家 AI 週報（每週一）
+name: LINE 每日速報（下午 4 點）
 
 on:
   # ─── 測試階段：只開放手動觸發 ───
-  # 確認功能穩定後，移除下方註解符號即可恢復「每週一 08:00 自動推送」：
+  # 確認功能穩定後，移除下方註解符號即可恢復「每日 16:00 自動推送」：
   #
   # schedule:
-  #   # 每週一台灣時間 08:00 = UTC 週一 00:00
-  #   - cron: '0 0 * * 1'
+  #   # 每日台灣時間 16:00 = UTC 08:00
+  #   - cron: '0 8 * * *'
 
   workflow_dispatch:
 
 jobs:
-  push-report:
+  push-daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Push weekly report to LINE
+      - name: Push daily brief to LINE
         env:
           BACKEND_API_BASE: ${{ secrets.BACKEND_API_BASE }}
           BACKEND_USERNAME: ${{ secrets.BACKEND_USERNAME }}
           BACKEND_PASSWORD: ${{ secrets.BACKEND_PASSWORD }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_TARGET_USER_ID: ${{ secrets.LINE_TARGET_USER_ID }}
-        run: python .github/scripts/line_weekly_report.py
+        run: python .github/scripts/line_daily_report.py

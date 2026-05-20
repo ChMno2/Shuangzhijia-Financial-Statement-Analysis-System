@@ -205,9 +205,10 @@ def build_products_list(df: pd.DataFrame) -> list:
 
 
 def get_daily_detail(sales_df: pd.DataFrame, days: int = 30,
-                     start_date: str = None, end_date: str = None) -> list:
+                     start_date: str = None, end_date: str = None,
+                     top_n: int = 2) -> list:
     """
-    取得每日銷售明細，含每日 TOP2 商品
+    取得每日銷售明細，含每日 TOP N 商品（預設 2）
     """
     df = _filter_by_range(sales_df, days, start_date, end_date)
     if df.empty:
@@ -220,13 +221,13 @@ def get_daily_detail(sales_df: pd.DataFrame, days: int = 30,
         revenue = float(grp["_sales"].sum())
         qty = int(grp["銷售數量"].sum()) if "銷售數量" in grp.columns else None
 
-        top2 = []
+        top_products = []
         if has_product:
-            top = grp.groupby("品名")["_sales"].sum().nlargest(2)
+            top = grp.groupby("品名")["_sales"].sum().nlargest(top_n)
             for name, rev in top.items():
-                top2.append({"name": str(name), "revenue": float(rev)})
+                top_products.append({"name": str(name), "revenue": float(rev)})
 
-        row = {"date": str(date_val), "revenue": revenue, "top_products": top2}
+        row = {"date": str(date_val), "revenue": revenue, "top_products": top_products}
         if qty is not None:
             row["quantity"] = qty
         result.append(row)
