@@ -1,0 +1,31 @@
+name: LINE 雙之家週報推送
+
+on:
+  # 每 3 天推一次：每月 1, 4, 7, 10, 13, 16, 19, 22, 25, 28 日的台灣時間早上 8 點
+  # （UTC 0 點 = 台灣 8 點）
+  # 註：月底 28 → 下月 1 號之間可能會跨 3~4 天，這是 cron 表達「每 3 天」的常見近似法
+  schedule:
+    - cron: '0 0 1,4,7,10,13,16,19,22,25,28 * *'
+
+  # 允許從 GitHub UI 手動觸發（用來測試）
+  workflow_dispatch:
+
+jobs:
+  push-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Push weekly report to LINE
+        env:
+          BACKEND_API_BASE: ${{ secrets.BACKEND_API_BASE }}
+          BACKEND_USERNAME: ${{ secrets.BACKEND_USERNAME }}
+          BACKEND_PASSWORD: ${{ secrets.BACKEND_PASSWORD }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TARGET_USER_ID: ${{ secrets.LINE_TARGET_USER_ID }}
+        run: python .github/scripts/line_weekly_report.py
