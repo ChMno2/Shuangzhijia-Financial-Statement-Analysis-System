@@ -5,10 +5,24 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 
+def _effective_latest(df: pd.DataFrame) -> pd.Timestamp:
+    """
+    取「資料最新日期」作為近 N 天視窗的基準，並夾在今天以內。
+    Why: 媽媽在 Google Sheet 偶爾會把日期輸入成未來日（例如 6/27 打成今年），
+    若直接用 max() 會把儀表板的 30 天視窗推到未來，造成歷史資料被排除在外、
+    看起來像「資料不見了」。
+    """
+    today = pd.Timestamp(datetime.today().date())
+    max_date = df["_date"].max()
+    if pd.isna(max_date):
+        return today
+    return min(max_date, today)
+
+
 def _filter_by_range(df: pd.DataFrame, days: int = None,
                      start_date: str = None, end_date: str = None) -> pd.DataFrame:
     """依天數或起迄日期篩選 DataFrame"""
-    latest = df["_date"].max()
+    latest = _effective_latest(df)
 
     if start_date and end_date:
         s = pd.Timestamp(start_date)
@@ -16,10 +30,10 @@ def _filter_by_range(df: pd.DataFrame, days: int = None,
         return df[(df["_date"] >= s) & (df["_date"] < e)]
     elif days:
         cutoff = latest - timedelta(days=days)
-        return df[df["_date"] >= cutoff]
+        return df[(df["_date"] >= cutoff) & (df["_date"] <= latest)]
     else:
         cutoff = latest - timedelta(days=30)
-        return df[df["_date"] >= cutoff]
+        return df[(df["_date"] >= cutoff) & (df["_date"] <= latest)]
 
 
 def build_dashboard_data(sales_df: pd.DataFrame, expense_df: pd.DataFrame = None) -> dict:
@@ -27,18 +41,22 @@ def build_dashboard_data(sales_df: pd.DataFrame, expense_df: pd.DataFrame = None
     if sales_df.empty:
         return {}
 
-    # 以資料最新日期為基準
-    latest = sales_df["_date"].max()
+    # 以資料最新日期為基準（夾在今天以內，避免未來日期把視窗推偏）
+    latest = _effective_latest(sales_df)
     ref = latest.to_pydatetime() if hasattr(latest, "to_pydatetime") else latest
 
     week_start = ref - timedelta(days=ref.weekday())
     last_week_start = week_start - timedelta(days=7)
+    week_end = week_start + timedelta(days=7)
     month_start = ref.replace(day=1)
+    next_month_start = (month_start + timedelta(days=32)).replace(day=1)
+    last_30_start = ref - timedelta(days=30)
+    last_30_end = ref + timedelta(days=1)
 
-    this_week = sales_df[sales_df["_date"] >= week_start]
+    this_week = sales_df[(sales_df["_date"] >= week_start) & (sales_df["_date"] < week_end)]
     last_week = sales_df[(sales_df["_date"] >= last_week_start) & (sales_df["_date"] < week_start)]
-    this_month = sales_df[sales_df["_date"] >= month_start]
-    last_30 = sales_df[sales_df["_date"] >= ref - timedelta(days=30)]
+    this_month = sales_df[(sales_df["_date"] >= month_start) & (sales_df["_date"] < next_month_start)]
+    last_30 = sales_df[(sales_df["_date"] >= last_30_start) & (sales_df["_date"] < last_30_end)]
 
     this_week_rev = float(this_week["_sales"].sum())
     last_week_rev = float(last_week["_sales"].sum())
