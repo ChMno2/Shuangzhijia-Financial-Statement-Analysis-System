@@ -2,7 +2,8 @@ import axios from 'axios'
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-const api = axios.create({ baseURL: BASE, timeout: 30000 })
+// 預設 90 秒，涵蓋 Render 免費方案閒置後的冷啟動（30~60 秒）
+const api = axios.create({ baseURL: BASE, timeout: 90000 })
 
 // 自動在每個請求帶入 Token
 api.interceptors.request.use(config => {

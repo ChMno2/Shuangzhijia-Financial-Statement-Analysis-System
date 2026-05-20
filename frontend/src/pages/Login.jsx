@@ -14,7 +14,8 @@ export default function Login({ onLogin }) {
     setError('')
     setLoading(true)
     try {
-      const res = await axios.post(`${BASE}/api/auth/login`, { username, password })
+      // 90 秒 timeout：涵蓋 Render 免費方案閒置後冷啟動的 30~60 秒延遲
+      const res = await axios.post(`${BASE}/api/auth/login`, { username, password }, { timeout: 90000 })
       const { access_token, username: user } = res.data
       localStorage.setItem('token', access_token)
       localStorage.setItem('username', user)
