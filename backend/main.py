@@ -4,9 +4,26 @@ FastAPI 後端主程式 — 雙之家日記帳分析系統
 import os
 import sqlite3
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import re
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -406,6 +423,161 @@ def refresh_data(user: str = Depends(get_current_user)):
         "this_month_revenue": s.get("this_month_revenue", 0),
         "total_transactions": s.get("total_transactions", 0),
     }
+
+
+# ─────────────────────────────────────────
+# LINE Bot Webhook（雙向對話：用戶在 LINE 問 → Claude 回答 → 回傳到 LINE）
+# ─────────────────────────────────────────
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
+LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
+
+# 暫存最近一次 webhook 看到的訊息來源（用來協助找出群組 ID）
+_last_line_source: dict = {"source": None, "received_at": None, "text": None}
+
+
+def _verify_line_signature(body: bytes, signature: str | None) -> bool:
+    """驗證 LINE webhook 簽章"""
+    if not LINE_CHANNEL_SECRET or not signature:
+        return False
+    digest = hmac.new(
+        LINE_CHANNEL_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).digest()
+    expected = base64.b64encode(digest).decode()
+    return hmac.compare_digest(expected, signature)
+
+
+def _strip_markdown(text: str) -> str:
+    """清除 markdown 符號（LINE 無法渲染粗體斜體）"""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"(?m)^\s*[#>]+\s*", "", text)
+    text = re.sub(r"(?m)^\s*[-*]\s+", "・", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text.strip()
+
+
+def _line_call(url: str, payload: dict, timeout: int = 15) -> tuple[int, str]:
+    """呼叫 LINE Messaging API"""
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def _line_reply(reply_token: str, text: str) -> tuple[int, str]:
+    return _line_call(LINE_REPLY_URL, {
+        "replyToken": reply_token,
+        "messages": [{"type": "text", "text": text[:4900]}],
+    })
+
+
+def _line_push(target_id: str, text: str) -> tuple[int, str]:
+    return _line_call(LINE_PUSH_URL, {
+        "to": target_id,
+        "messages": [{"type": "text", "text": text[:4900]}],
+    })
+
+
+def _process_line_event(event: dict) -> None:
+    """處理單一 LINE webhook 事件 — 同步函式，由 BackgroundTasks 在 threadpool 執行"""
+    global _last_line_source
+
+    src = event.get("source", {}) or {}
+    # 更新「最近來源」紀錄（協助使用者找出群組 ID）
+    _last_line_source = {
+        "source": src,
+        "received_at": datetime.now().isoformat(),
+        "text": (event.get("message") or {}).get("text") if event.get("type") == "message" else None,
+    }
+
+    if event.get("type") != "message":
+        return
+
+    msg = event.get("message") or {}
+    if msg.get("type") != "text":
+        return
+
+    reply_token = event.get("replyToken", "")
+    question = (msg.get("text") or "").strip()
+    if not question or not reply_token:
+        return
+
+    # 簡單問候 / 求助訊息 — 不浪費 API token
+    quick_replies = {
+        "hi": "您好！我是雙之家後台小幫手，可以問我任何銷售相關問題。",
+        "hello": "您好！我是雙之家後台小幫手，可以問我任何銷售相關問題。",
+        "你好": "您好！我是雙之家後台小幫手，可以問我任何銷售相關問題。",
+        "help": "可以問我：\n・本週賣最好的商品是什麼？\n・這個月各營業點的銷售比較\n・下週天氣會影響哪個品類？",
+        "說明": "可以問我：\n・本週賣最好的商品是什麼？\n・這個月各營業點的銷售比較\n・下週天氣會影響哪個品類？",
+    }
+    if question.lower() in quick_replies:
+        _line_reply(reply_token, quick_replies[question.lower()])
+        return
+
+    # 呼叫現有的 AI 分析（含 SQL/天氣/搜尋工具）
+    try:
+        answer = analyze_with_agent(question, [])
+        answer = _strip_markdown(answer)
+        if not answer:
+            answer = "（沒有回應，請換個方式問問看）"
+    except Exception as e:
+        answer = f"⚠️ 分析時發生錯誤：{str(e)[:300]}"
+
+    status_code, body = _line_reply(reply_token, answer)
+    if status_code != 200:
+        # Reply token 可能過期；fallback 用 push
+        target = src.get("groupId") or src.get("roomId") or src.get("userId")
+        if target:
+            _line_push(target, answer)
+
+
+@app.post("/api/line/webhook")
+async def line_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_line_signature: str | None = Header(default=None, alias="X-Line-Signature"),
+):
+    """LINE Messaging API webhook 入口（必須在 ~10 秒內回 200）"""
+    body = await request.body()
+
+    # LINE 平台「Verify webhook」按鈕會送一個沒有 events 的空請求；
+    # 也允許簽章驗證失敗時回 200 不要崩，但事件就不處理
+    if not _verify_line_signature(body, x_line_signature):
+        # 不直接 403 — 避免 LINE Console 的 verify 按鈕誤判
+        return {"status": "signature_invalid"}
+
+    try:
+        payload = json.loads(body.decode() or "{}")
+    except json.JSONDecodeError:
+        return {"status": "invalid_json"}
+
+    for event in payload.get("events", []):
+        background_tasks.add_task(_process_line_event, event)
+
+    return {"status": "ok"}
+
+
+@app.get("/api/line/last-source")
+def get_last_line_source(user: str = Depends(get_current_user)):
+    """
+    取得最近一次 webhook 收到的訊息來源 — 用來找出群組 ID。
+    用法：把 bot 邀進群組 → 群組裡傳一句話 → 呼叫這支 API → 拿到 groupId。
+    """
+    return _last_line_source
 
 
 @app.get("/api/line/daily")
