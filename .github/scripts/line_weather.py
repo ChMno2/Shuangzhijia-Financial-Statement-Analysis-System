@@ -61,8 +61,11 @@ def _parse_cwa_time(s: str) -> datetime | None:
         return None
 
 
-def fetch_township_weather(dataset_id: str, township: str) -> dict | None:
-    """取得指定鄉鎮的今日天氣"""
+def fetch_township_weather(dataset_id: str, township: str, day_offset: int = 1) -> dict | None:
+    """
+    取得指定鄉鎮的單日天氣
+    day_offset: 0=今天、1=明天、2=後天 ...
+    """
     data = http_get_json(
         f"{CWA_BASE}/{dataset_id}",
         {"Authorization": CWA_KEY, "LocationName": township, "format": "JSON"},
@@ -73,39 +76,31 @@ def fetch_township_weather(dataset_id: str, township: str) -> dict | None:
     except (KeyError, IndexError):
         return None
 
-    now = datetime.now()
-    # 「今天」指今日 06:00 ~ 隔日 06:00（涵蓋早上 4 點推送到當日結束）
-    today_start = now.replace(hour=6, minute=0, second=0, microsecond=0)
-    if now.hour < 6:
-        today_start -= timedelta(days=1)
-    today_end = today_start + timedelta(days=1)
+    # 目標日 = 今天 + day_offset，整個日曆日（00:00 ~ 24:00）
+    target_day = (datetime.now() + timedelta(days=day_offset)).date()
+    day_start = datetime.combine(target_day, datetime.min.time())
+    day_end = day_start + timedelta(days=1)
 
-    def in_today(t: datetime) -> bool:
-        return today_start <= t < today_end
+    def in_target_day(t: datetime) -> bool:
+        return day_start <= t < day_end
 
-    def first_value(times: list, value_key: str) -> str | None:
-        """從一個 Time 序列裡，取「涵蓋現在或最接近未來」的值"""
+    def pick_in_day(times: list, value_key: str) -> str | None:
+        """從 Time 序列中取「目標日」期間第一筆有效值"""
         for t in times:
-            start_raw = t.get("StartTime") or t.get("DataTime")
-            end_raw = t.get("EndTime") or t.get("DataTime")
-            start = _parse_cwa_time(start_raw)
-            end = _parse_cwa_time(end_raw)
-            if start is None:
-                continue
-            # 若該筆完全在過去，跳過
-            if end and end < now:
+            ts = _parse_cwa_time(t.get("DataTime") or t.get("StartTime"))
+            if ts is None or not in_target_day(ts):
                 continue
             val = (t.get("ElementValue") or [{}])[0].get(value_key)
             if val not in (None, "", "-99"):
                 return val
         return None
 
-    def collect_today(times: list, value_key: str) -> list[float]:
-        """收集「今天」這個區間內的所有數值（給溫度抓最高最低用）"""
+    def collect_in_day(times: list, value_key: str) -> list[float]:
+        """收集「目標日」這個區間內的所有數值（給溫度抓最高最低用）"""
         out = []
         for t in times:
             ts = _parse_cwa_time(t.get("DataTime") or t.get("StartTime"))
-            if ts is None or not in_today(ts):
+            if ts is None or not in_target_day(ts):
                 continue
             val = (t.get("ElementValue") or [{}])[0].get(value_key)
             try:
@@ -114,18 +109,18 @@ def fetch_township_weather(dataset_id: str, township: str) -> dict | None:
                 continue
         return out
 
-    # 今日最高/最低溫（從 56 筆「溫度」中過濾今天）
-    temps = collect_today(elements.get("溫度", {}).get("Time", []), "Temperature")
+    # 最高/最低溫（從多筆「溫度」中過濾出目標日）
+    temps = collect_in_day(elements.get("溫度", {}).get("Time", []), "Temperature")
     max_temp = str(int(max(temps))) if temps else None
     min_temp = str(int(min(temps))) if temps else None
 
-    # 取「現在或最近」的單點資料
-    humidity = first_value(elements.get("相對濕度", {}).get("Time", []), "RelativeHumidity")
-    pop = first_value(
+    # 取目標日的代表值
+    humidity = pick_in_day(elements.get("相對濕度", {}).get("Time", []), "RelativeHumidity")
+    pop = pick_in_day(
         elements.get("3小時降雨機率", {}).get("Time", []),
         "ProbabilityOfPrecipitation",
     )
-    weather = first_value(elements.get("天氣現象", {}).get("Time", []), "Weather") or "—"
+    weather = pick_in_day(elements.get("天氣現象", {}).get("Time", []), "Weather") or "—"
 
     return {
         "max_temp": max_temp,
@@ -195,15 +190,20 @@ def build_advice(w: dict) -> str:
 
 
 def format_message() -> str:
-    today = datetime.now().strftime("%-m/%-d") if os.name != "nt" else datetime.now().strftime("%#m/%#d")
-    weekday = ["一", "二", "三", "四", "五", "六", "日"][datetime.now().weekday()]
-    lines = [f"☀️ 今日天氣預報（{today} 週{weekday}）"]
+    # 預設預報「明天」（day_offset=1）；可由環境變數 WEATHER_DAY_OFFSET 覆寫
+    day_offset = int(os.environ.get("WEATHER_DAY_OFFSET", "1"))
+    target = datetime.now() + timedelta(days=day_offset)
+    label_map = {0: "今日", 1: "明日", 2: "後天"}
+    day_label = label_map.get(day_offset, f"+{day_offset}日")
+    date_str = target.strftime("%-m/%-d") if os.name != "nt" else target.strftime("%#m/%#d")
+    weekday = ["一", "二", "三", "四", "五", "六", "日"][target.weekday()]
+    lines = [f"☀️ {day_label}天氣預報（{date_str} 週{weekday}）"]
     lines.append("════════════")
 
     for label, dataset_id, township in LOCATIONS:
-        print(f"取 {label} 天氣 ...", flush=True)
+        print(f"取 {label} 天氣（{day_label}）...", flush=True)
         try:
-            w = fetch_township_weather(dataset_id, township)
+            w = fetch_township_weather(dataset_id, township, day_offset=day_offset)
         except Exception as e:
             lines.append(f"📍 {label}")
             lines.append(f"⚠️ 取得失敗：{e}")
