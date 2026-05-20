@@ -50,8 +50,19 @@ def http_get_json(url: str, params: dict, timeout: int = 30):
         return json.loads(resp.read().decode())
 
 
+def _parse_cwa_time(s: str) -> datetime | None:
+    """CWA 時間字串 e.g. '2026-05-20T18:00:00+08:00' → naive datetime（去掉時區）"""
+    if not s:
+        return None
+    try:
+        # Python 3.11+ 支援 +08:00 ISO 格式；保險起見手動切掉
+        return datetime.fromisoformat(s.replace("+08:00", ""))
+    except ValueError:
+        return None
+
+
 def fetch_township_weather(dataset_id: str, township: str) -> dict | None:
-    """取得指定鄉鎮的今日天氣（取最近 24 小時內的代表預報）"""
+    """取得指定鄉鎮的今日天氣"""
     data = http_get_json(
         f"{CWA_BASE}/{dataset_id}",
         {"Authorization": CWA_KEY, "LocationName": township, "format": "JSON"},
@@ -62,40 +73,66 @@ def fetch_township_weather(dataset_id: str, township: str) -> dict | None:
     except (KeyError, IndexError):
         return None
 
-    # 取「最早一筆未結束」的時間段做代表（即「現在或接下來最近的 3 小時」）
     now = datetime.now()
-    target_end = now + timedelta(hours=24)
+    # 「今天」指今日 06:00 ~ 隔日 06:00（涵蓋早上 4 點推送到當日結束）
+    today_start = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    if now.hour < 6:
+        today_start -= timedelta(days=1)
+    today_end = today_start + timedelta(days=1)
 
-    def pick(element_name: str) -> str | None:
-        el = elements.get(element_name)
-        if not el:
-            return None
-        for t in el.get("Time", []):
-            start = datetime.fromisoformat(t.get("StartTime", "").replace("+08:00", ""))
-            if start > target_end:
-                break
-            val = t.get("ElementValue", [{}])[0]
-            # 取第一個 value 欄位（不同元素 key 不一樣）
-            for k, v in val.items():
-                if v and v != "-99":
-                    return v
+    def in_today(t: datetime) -> bool:
+        return today_start <= t < today_end
+
+    def first_value(times: list, value_key: str) -> str | None:
+        """從一個 Time 序列裡，取「涵蓋現在或最接近未來」的值"""
+        for t in times:
+            start_raw = t.get("StartTime") or t.get("DataTime")
+            end_raw = t.get("EndTime") or t.get("DataTime")
+            start = _parse_cwa_time(start_raw)
+            end = _parse_cwa_time(end_raw)
+            if start is None:
+                continue
+            # 若該筆完全在過去，跳過
+            if end and end < now:
+                continue
+            val = (t.get("ElementValue") or [{}])[0].get(value_key)
+            if val not in (None, "", "-99"):
+                return val
         return None
 
-    # 今天高低溫：用 MaxT / MinT（鄉鎮預報用「最高溫度」/「最低溫度」/「平均相對濕度」）
-    today_max = pick("最高溫度") or pick("溫度")
-    today_min = pick("最低溫度") or pick("溫度")
-    humidity = pick("平均相對濕度") or pick("相對濕度")
-    pop = pick("12小時降雨機率") or pick("3小時降雨機率") or pick("6小時降雨機率")
-    weather = pick("天氣現象") or pick("天氣預報綜合描述") or "—"
-    comfort = pick("舒適度指數") or pick("最大舒適度指數") or ""
+    def collect_today(times: list, value_key: str) -> list[float]:
+        """收集「今天」這個區間內的所有數值（給溫度抓最高最低用）"""
+        out = []
+        for t in times:
+            ts = _parse_cwa_time(t.get("DataTime") or t.get("StartTime"))
+            if ts is None or not in_today(ts):
+                continue
+            val = (t.get("ElementValue") or [{}])[0].get(value_key)
+            try:
+                out.append(float(val))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    # 今日最高/最低溫（從 56 筆「溫度」中過濾今天）
+    temps = collect_today(elements.get("溫度", {}).get("Time", []), "Temperature")
+    max_temp = str(int(max(temps))) if temps else None
+    min_temp = str(int(min(temps))) if temps else None
+
+    # 取「現在或最近」的單點資料
+    humidity = first_value(elements.get("相對濕度", {}).get("Time", []), "RelativeHumidity")
+    pop = first_value(
+        elements.get("3小時降雨機率", {}).get("Time", []),
+        "ProbabilityOfPrecipitation",
+    )
+    weather = first_value(elements.get("天氣現象", {}).get("Time", []), "Weather") or "—"
 
     return {
-        "max_temp": today_max,
-        "min_temp": today_min,
+        "max_temp": max_temp,
+        "min_temp": min_temp,
         "humidity": humidity,
         "pop": pop,
         "weather": weather,
-        "comfort": comfort,
     }
 
 
