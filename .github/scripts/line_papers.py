@@ -324,8 +324,8 @@ def _gemini_call(prompt: str, max_output_tokens: int = 4096,
         "generationConfig": gen_config,
     }).encode()
 
-    delay = 10.0
-    for attempt in range(4):
+    delay = 15.0
+    for attempt in range(3):
         req = urllib.request.Request(
             url,
             data=body,
@@ -337,11 +337,17 @@ def _gemini_call(prompt: str, max_output_tokens: int = 4096,
                 data = json.loads(resp.read().decode())
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 3:
-                print(f"⏳ Gemini 429，等 {delay:.0f} 秒後重試 ({attempt + 1}/4)", flush=True)
+            err_body = ""
+            try:
+                err_body = e.read().decode()[:400]
+            except Exception:
+                pass
+            if e.code == 429 and attempt < 2:
+                print(f"⏳ Gemini 429（{err_body[:120]}），等 {delay:.0f} 秒後重試 ({attempt + 1}/3)", flush=True)
                 time.sleep(delay)
                 delay *= 1.5
                 continue
+            print(f"⚠️ Gemini HTTP {e.code}：{err_body}", flush=True)
             raise
 
 
@@ -351,6 +357,27 @@ def _clean_markdown(text: str) -> str:
     text = re.sub(r"(?m)^\s*[-*]\s+", "・", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
     return text.strip()
+
+
+def gemini_summarize_single(title: str, abstract: str) -> str | None:
+    """單篇摘要（簡單 prompt，回傳兩段純文字）；失敗回 None"""
+    prompt = (
+        f"請用繁體中文，分成兩段說明這篇論文的核心貢獻。\n\n"
+        f"標題：{title}\n\n"
+        f"摘要：{(abstract or '')[:1500]}\n\n"
+        f"規則：\n"
+        f"・第一段：論文解決什麼問題 + 用什麼方法（1~2 句）\n"
+        f"・第二段：與既有方法相比最有特色的貢獻 / 突破 / 影響（1~2 句）\n"
+        f"・第一段和第二段用空行分隔\n"
+        f"・兩段加總不超過 220 字，純文字，禁用 markdown 符號（# * _ > ` 等）\n"
+        f"・原文為英文時請翻譯成中文，不可照貼英文"
+    )
+    try:
+        text = _gemini_call(prompt, max_output_tokens=600)
+        return _clean_markdown(text)
+    except Exception as e:
+        print(f"⚠️ 單篇摘要失敗：{e}", flush=True)
+        return None
 
 
 def gemini_summarize_batch(papers: list[dict]) -> dict[int, str]:
@@ -522,15 +549,25 @@ def main() -> None:
     selected = random.sample(pool, min(TOP_N, len(pool)))
     print(f"今日選出：{len(selected)} 篇", flush=True)
 
-    # 一次 batch 摘要全部 5 篇（節省 API 次數，避開 Gemini 免費版 rate limit）
-    print(f"  Gemini 批次摘要 {len(selected)} 篇 ...", flush=True)
-    summaries = gemini_summarize_batch(selected)
+    # 逐篇 Gemini 摘要 — 每篇間隔 15 秒，分散到 RPM 視窗外避免 rate limit
+    # （batch 模式雖然省 quota 但 5 篇丟在同一秒容易撞 RPM 上限）
+    print(f"  Gemini 逐篇摘要 {len(selected)} 篇（每篇間隔 15 秒避開 rate limit）...", flush=True)
+    success_count = 0
     for i, p in enumerate(selected, 1):
-        if i in summaries:
-            p["_summary"] = summaries[i]
+        if i > 1:
+            time.sleep(15)
+        print(f"  [{i}/{len(selected)}] 摘要：{p.get('title', '')[:55]}", flush=True)
+        summary = gemini_summarize_single(p["title"], p["abstract"])
+        if summary:
+            p["_summary"] = summary
+            success_count += 1
         else:
-            # fallback：batch 解析失敗時用原始摘要前 250 字
-            p["_summary"] = f"（自動摘要不可用，以下為原始摘要節錄）\n{(p.get('abstract') or '')[:250]}..."
+            # fallback：顯示原始摘要節錄
+            p["_summary"] = (
+                f"（自動摘要不可用，以下為原始摘要節錄）\n"
+                f"{(p.get('abstract') or '')[:250]}..."
+            )
+    print(f"  → {success_count}/{len(selected)} 篇摘要成功", flush=True)
 
     msg = format_message(selected)
     print("---- 訊息預覽 ----", flush=True)
