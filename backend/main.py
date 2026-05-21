@@ -63,7 +63,7 @@ _init_db()
 
 from google_sheets import download_excel, get_recent_sheet_names, load_all_sales, load_all_expenses
 from data_processor import build_dashboard_data, get_daily_detail, get_profit_report, build_period_summary
-from llm_analyzer import analyze_with_llm, analyze_with_agent, generate_weekly_report
+from llm_analyzer import analyze_with_llm, analyze_with_agent, analyze_with_agent_gemini, generate_weekly_report
 from auth import verify_password, create_token, get_current_user, ADMIN_USERNAME, ADMIN_PASSWORD_HASH
 from sales_db import init_sales_db, sync_from_dataframe
 
@@ -528,9 +528,16 @@ def _process_line_event(event: dict) -> None:
         _line_reply(reply_token, quick_replies[question.lower()])
         return
 
-    # 呼叫現有的 AI 分析（含 SQL/天氣/搜尋工具）
+    # 呼叫 AI 分析（含 SQL/天氣/搜尋工具）
+    # 以 LLM_PROVIDER 環境變數切換引擎：
+    #   gemini → Gemini 2.0 Flash（免費）
+    #   其他 / 未設定 → Claude（預設、最高品質）
+    provider = os.getenv("LLM_PROVIDER", "claude").lower()
     try:
-        answer = analyze_with_agent(question, [])
+        if provider == "gemini":
+            answer = analyze_with_agent_gemini(question, [])
+        else:
+            answer = analyze_with_agent(question, [])
         answer = _strip_markdown(answer)
         if not answer:
             answer = "（沒有回應，請換個方式問問看）"

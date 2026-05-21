@@ -1,15 +1,21 @@
 """
-LLM 問答分析模組：使用 Claude API 針對商業資料進行自然語言分析
+LLM 問答分析模組：使用 Claude 或 Gemini 針對商業資料進行自然語言分析
 Phase 1 升級：加入 tool_use Agent，取代固定 context 問答
+Phase 2：加入 Gemini 版本 agent（免費替代方案），由 LLM_PROVIDER 環境變數切換
 """
 import os
 import json
+import urllib.error
+import urllib.request
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
 
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 AGENT_SYSTEM_PROMPT = """你是雙之家的商業智慧分析師。雙之家販售日本進口商品（服飾、醫藥、食品、雜貨），有光復、新埔等營業點。
 
@@ -86,6 +92,117 @@ def analyze_with_agent(question: str, chat_history: list = None) -> str:
             break
 
     return "分析過程出現異常，請重試。"
+
+
+# ─────────────────────────────────────────
+# Gemini 版本的 Agent（免費替代方案）
+# ─────────────────────────────────────────
+
+def _claude_tools_to_gemini(claude_tools: list) -> list:
+    """把 Claude 的 tool definitions 轉成 Gemini functionDeclarations 格式"""
+    out = []
+    for t in claude_tools:
+        out.append({
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+        })
+    return out
+
+
+def _gemini_post(payload: dict, timeout: int = 60) -> dict:
+    """呼叫 Gemini generateContent API"""
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def analyze_with_agent_gemini(question: str, chat_history: list = None) -> str:
+    """
+    使用 Gemini function calling 的 Agent 版本（免費）
+    - 同樣可用 query_sales / get_summary / get_weather_forecast / web_search 等工具
+    - 適用於 LINE 雙向對話以節省 token 成本
+    """
+    if not GEMINI_API_KEY:
+        return "（GEMINI_API_KEY 未設定，請在 Render 環境變數加上）"
+
+    from sales_db import TOOL_DEFINITIONS, TOOL_FUNCTIONS
+    from external_tools import EXTERNAL_TOOL_DEFINITIONS, EXTERNAL_TOOL_FUNCTIONS
+
+    all_claude_tools = TOOL_DEFINITIONS + EXTERNAL_TOOL_DEFINITIONS
+    all_functions = {**TOOL_FUNCTIONS, **EXTERNAL_TOOL_FUNCTIONS}
+    gemini_tools = [{"functionDeclarations": _claude_tools_to_gemini(all_claude_tools)}]
+
+    # 組對話歷史（Gemini 用 model 取代 assistant，parts: [{text}]）
+    contents: list[dict] = []
+    if chat_history:
+        for msg in chat_history[-10:]:
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            role = "user" if msg.get("role") == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": content}]})
+    contents.append({"role": "user", "parts": [{"text": question}]})
+
+    base_payload = {
+        "tools": gemini_tools,
+        "systemInstruction": {"parts": [{"text": AGENT_SYSTEM_PROMPT}]},
+        "generationConfig": {"maxOutputTokens": 2500, "temperature": 0.3},
+    }
+
+    for _ in range(8):  # 最多 8 輪工具呼叫
+        try:
+            response = _gemini_post({**base_payload, "contents": contents})
+        except urllib.error.HTTPError as e:
+            return f"（Gemini API 失敗 HTTP {e.code}：{e.read().decode()[:200]}）"
+        except Exception as e:
+            return f"（Gemini 呼叫失敗：{e}）"
+
+        candidates = response.get("candidates") or []
+        if not candidates:
+            # 可能因 safety filter 被擋
+            block_reason = response.get("promptFeedback", {}).get("blockReason", "未知")
+            return f"（Gemini 沒有回應，blockReason={block_reason}）"
+
+        parts = candidates[0].get("content", {}).get("parts") or []
+        function_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+
+        if not function_calls:
+            # 無工具呼叫 → 取出純文字當最終答案
+            text_pieces = [p.get("text", "") for p in parts if "text" in p]
+            return ("\n".join(t for t in text_pieces if t)).strip() or "（無回應）"
+
+        # 把這輪 model 的工具呼叫加進對話
+        contents.append({"role": "model", "parts": parts})
+
+        # 執行工具、把結果回填
+        tool_responses = []
+        for fc in function_calls:
+            name = fc.get("name")
+            args = fc.get("args") or {}
+            try:
+                fn = all_functions.get(name)
+                result = fn(**args) if fn else {"error": f"未知工具：{name}"}
+            except Exception as e:
+                result = {"error": str(e)}
+            tool_responses.append({
+                "functionResponse": {
+                    "name": name,
+                    "response": {"content": result},
+                }
+            })
+        contents.append({"role": "function", "parts": tool_responses})
+
+    return "分析過程超過工具呼叫上限，請換個方式問問看。"
 
 
 def build_data_context(data: dict) -> str:
