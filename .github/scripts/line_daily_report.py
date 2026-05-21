@@ -128,6 +128,14 @@ def push_line(text: str) -> None:
 def main() -> None:
     token = login()
     daily = fetch_daily(token)
+
+    # 沒出攤 / 當日沒銷售資料 → 不推播
+    # （媽媽沒填當日 Excel 或當日營收為 0 都跳過，避免推「今日營收 NT$ 0」這種無意義訊息）
+    if not daily.get("has_data") or float(daily.get("revenue") or 0) == 0:
+        print(f"✋ 今日 {daily.get('date')} 無銷售資料（has_data={daily.get('has_data')}, "
+              f"revenue={daily.get('revenue')}），跳過推送", flush=True)
+        return
+
     msg = format_message(daily)
     print("---- 訊息預覽 ----", flush=True)
     print(msg, flush=True)
