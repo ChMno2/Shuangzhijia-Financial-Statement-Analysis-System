@@ -1,0 +1,24 @@
+name: LINE AI 論文精選（上午 8 點）
+
+on:
+  schedule:
+    # 每日台灣時間 08:00 = UTC 00:00
+    - cron: '0 0 * * *'
+
+  workflow_dispatch:
+
+jobs:
+  push-papers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Push AI papers to LINE
+        env:
+          PAPERS_LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.PAPERS_LINE_CHANNEL_ACCESS_TOKEN }}
+          PAPERS_LINE_TARGET_USER_ID: ${{ secrets.PAPERS_LINE_TARGET_USER_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python .github/scripts/line_papers.py
