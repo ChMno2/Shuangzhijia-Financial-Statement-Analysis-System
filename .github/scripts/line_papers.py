@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 # ─────────────────────────────────────────
@@ -122,48 +123,154 @@ def in_whitelist(venue: str) -> bool:
     return any(w.lower() in v for w in VENUE_WHITELIST)
 
 
+# arXiv 篩選：只收 AI/ML/CV/NLP 相關類別（其他類別容易吃到無關論文）
+AI_CATEGORIES = {"cs.AI", "cs.LG", "cs.CV", "cs.CL", "cs.NE", "cs.IR", "stat.ML"}
+
+ATOM_NS = "{http://www.w3.org/2005/Atom}"
+ARXIV_NS = "{http://arxiv.org/schemas/atom}"
+
+
+def detect_venue_from_comment(comment: str) -> str:
+    """從 arXiv 論文的 comment 欄解析「accepted to XXX」這類關鍵字"""
+    if not comment:
+        return "arXiv"
+    cl = comment.lower()
+    for v in VENUE_WHITELIST:
+        if v.lower() == "arxiv":
+            continue
+        if v.lower() in cl:
+            return v
+    return "arXiv"
+
+
+def search_arxiv(topic: str, max_results: int = 30) -> list[dict]:
+    """
+    從 arXiv API 搜尋論文（無 rate limit、所有頂會論文都會放這）
+    回傳已過濾的論文清單（normalized format）
+    """
+    # arXiv search syntax: '+' 在 search_query 內代表 AND
+    plus_joined = "+AND+".join(f"all:{urllib.parse.quote(w)}" for w in topic.split())
+    url = (
+        f"http://export.arxiv.org/api/query"
+        f"?search_query={plus_joined}"
+        f"&start=0&max_results={max_results}"
+        f"&sortBy=submittedDate&sortOrder=descending"
+    )
+
+    req = urllib.request.Request(url, headers={"User-Agent": "shuangzhijia-papers-bot/1.0"})
+
+    # arXiv 偶爾會 429（共用 IP 流量大）；指數退避重試
+    xml_bytes = None
+    delay = 5.0
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                xml_bytes = resp.read()
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                print(f"⏳ arXiv 429，等 {delay:.0f} 秒後重試 ({attempt + 1}/3)", flush=True)
+                time.sleep(delay)
+                delay *= 2  # 5, 10
+                continue
+            print(f"⚠️ arXiv HTTP 失敗：{e}", flush=True)
+            return []
+        except Exception as e:
+            print(f"⚠️ arXiv 連線失敗：{e}", flush=True)
+            return []
+
+    if xml_bytes is None:
+        return []
+
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as e:
+        print(f"⚠️ arXiv XML 解析失敗：{e}", flush=True)
+        return []
+
+    papers = []
+    for entry in root.findall(f"{ATOM_NS}entry"):
+        title = (entry.findtext(f"{ATOM_NS}title") or "").strip().replace("\n", " ").replace("  ", " ")
+        abstract = (entry.findtext(f"{ATOM_NS}summary") or "").strip().replace("\n", " ").replace("  ", " ")
+        published = (entry.findtext(f"{ATOM_NS}published") or "").strip()
+        id_str = (entry.findtext(f"{ATOM_NS}id") or "").strip()
+
+        # 解析 arxiv ID（去掉版本號 v1/v2）
+        arxiv_id = id_str.split("/abs/")[-1] if "/abs/" in id_str else id_str.rsplit("/", 1)[-1]
+        arxiv_id_clean = re.sub(r"v\d+$", "", arxiv_id)
+
+        # 發布時間
+        published_dt = None
+        if published:
+            try:
+                published_dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
+                published_dt = published_dt.replace(tzinfo=None)
+            except ValueError:
+                pass
+
+        year = published_dt.year if published_dt else None
+
+        # 年份過濾
+        if year is None or year < 2024:
+            continue
+
+        # 類別過濾：必須包含至少一個 AI/ML 類別
+        cats = [c.attrib.get("term") for c in entry.findall(f"{ATOM_NS}category")]
+        if not any(c in AI_CATEGORIES for c in cats):
+            continue
+
+        # 從 comment 欄抓 venue（許多論文會註明 accepted to ...）
+        comment_el = entry.find(f"{ARXIV_NS}comment")
+        comment = comment_el.text if comment_el is not None and comment_el.text else ""
+        venue = detect_venue_from_comment(comment)
+
+        papers.append({
+            "title": title,
+            "abstract": abstract,
+            "year": year,
+            "venue": venue,
+            "_venue": venue,
+            "url": f"https://arxiv.org/abs/{arxiv_id_clean}",
+            "published_dt": published_dt,
+            "arxiv_id": arxiv_id_clean,
+            "categories": cats,
+            "_source": "arxiv",
+        })
+
+    return papers
+
+
 def collect_papers() -> list[dict]:
-    """跑所有主題 → 過濾 → 去重 → 排序"""
+    """跑所有主題 → 過濾 → 去重 → 排序（用 arXiv 為主要來源）"""
     seen: set[str] = set()
     bucket: list[dict] = []
 
     for idx, topic in enumerate(TOPIC_QUERIES):
         if idx > 0:
-            time.sleep(3.5)  # Semantic Scholar 免費 API 限速，保守拉到 3.5 秒
-        print(f"搜尋 [{topic}] ...", flush=True)
-        papers = search_semantic_scholar(topic)
+            time.sleep(5.0)  # arXiv 官方建議「至少 3 秒一次」，保守設 5 秒
+        print(f"搜尋 [{topic}] (arXiv) ...", flush=True)
+        papers = search_arxiv(topic, max_results=SEARCH_LIMIT_PER_TOPIC)
+
         kept = 0
         for p in papers:
-            pid = p.get("paperId") or (p.get("externalIds") or {}).get("DOI") or p.get("title")
+            # 用 arxiv_id 去重（不同主題可能撈到同一篇）
+            pid = p.get("arxiv_id") or p.get("title")
             if pid in seen:
                 continue
             seen.add(pid)
 
-            # venue 白名單過濾（preprintsserver/arxiv 也算 arXiv）
-            venue = p.get("venue") or ""
-            ext = p.get("externalIds") or {}
-            if not venue and ext.get("ArXiv"):
-                venue = "arXiv"
-            if not in_whitelist(venue):
-                continue
-
-            # 必須有摘要才能讓 Claude 寫貢獻
+            # 必須有摘要
             if not p.get("abstract"):
                 continue
 
-            p["_venue"] = venue
             p["_topic"] = topic
             bucket.append(p)
             kept += 1
-        print(f"   → 符合白名單 + 有摘要：{kept} 篇", flush=True)
+        print(f"   → 入選 {kept} 篇", flush=True)
 
-    # 排序：influential citation > 一般 citation > 年份
+    # 排序：發布時間遞減（最新優先）
     bucket.sort(
-        key=lambda p: (
-            p.get("influentialCitationCount") or 0,
-            p.get("citationCount") or 0,
-            p.get("year") or 0,
-        ),
+        key=lambda p: p.get("published_dt") or datetime.min,
         reverse=True,
     )
     return bucket
@@ -213,16 +320,12 @@ def claude_summarize(title: str, abstract: str) -> str:
 
 
 def get_paper_url(p: dict) -> str:
-    """取論文連結，優先 arXiv → DOI → openAccessPdf → SS 頁面"""
-    ext = p.get("externalIds") or {}
-    if ext.get("ArXiv"):
-        return f"https://arxiv.org/abs/{ext['ArXiv']}"
-    pdf = p.get("openAccessPdf") or {}
-    if isinstance(pdf, dict) and pdf.get("url"):
-        return pdf["url"]
-    if ext.get("DOI"):
-        return f"https://doi.org/{ext['DOI']}"
-    return f"https://www.semanticscholar.org/paper/{p.get('paperId', '')}"
+    """取論文連結（normalized 格式 → 直接拿 url）"""
+    if p.get("url"):
+        return p["url"]
+    if p.get("arxiv_id"):
+        return f"https://arxiv.org/abs/{p['arxiv_id']}"
+    return ""
 
 
 def format_message(papers: list[dict]) -> str:
@@ -237,16 +340,18 @@ def format_message(papers: list[dict]) -> str:
 
     for i, p in enumerate(papers, 1):
         title = (p.get("title") or "").strip()
-        venue = p.get("_venue", "—")
+        venue = p.get("_venue", "arXiv")
         year = p.get("year", "—")
-        infl = p.get("influentialCitationCount") or 0
-        cites = p.get("citationCount") or 0
         url = get_paper_url(p)
         summary = p.get("_summary", "")
 
+        # 發布日期顯示 YYYY-MM-DD
+        pub_dt = p.get("published_dt")
+        date_str = pub_dt.strftime("%Y-%m-%d") if pub_dt else str(year)
+
         lines.append("")
         lines.append(f"━━ {i}. {title}")
-        lines.append(f"📌 {venue} {year} · 被引 {cites}（影響力 {infl}）")
+        lines.append(f"📌 {venue} · {date_str}")
         lines.append(f"🔗 {url}")
         lines.append("")
         lines.append(summary)
