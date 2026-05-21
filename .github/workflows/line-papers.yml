@@ -20,5 +20,5 @@ jobs:
         env:
           PAPERS_LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.PAPERS_LINE_CHANNEL_ACCESS_TOKEN }}
           PAPERS_LINE_TARGET_USER_ID: ${{ secrets.PAPERS_LINE_TARGET_USER_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python .github/scripts/line_papers.py

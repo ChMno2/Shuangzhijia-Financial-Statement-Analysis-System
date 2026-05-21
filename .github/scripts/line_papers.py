@@ -8,13 +8,14 @@ AI 論文每日精選 LINE 推播腳本（獨立 bot）
   2. 過濾頂刊頂會（CVPR、NeurIPS、ICML、ICLR、IEEE、arXiv 等）
   3. 依 influential citation 排序，取前 POOL_SIZE
   4. 以日期為 seed 隨機抽 TOP_N 篇（每天不同）
-  5. 用 Claude API 為每篇生成「兩段話」中文摘要（聚焦貢獻）
+  5. 用 Gemini API 為每篇生成「兩段話」中文摘要（聚焦貢獻；免費）
   6. 推送到 LINE
 
 所需環境變數（GitHub Secrets）：
   PAPERS_LINE_CHANNEL_ACCESS_TOKEN
   PAPERS_LINE_TARGET_USER_ID
-  ANTHROPIC_API_KEY                Claude API key（同你後端用的那把）
+  GEMINI_API_KEY                   到 https://aistudio.google.com/app/apikey 申請（免費）
+  GEMINI_MODEL                     （選填）預設 gemini-2.0-flash
 """
 import json
 import os
@@ -66,7 +67,8 @@ def _env(name: str) -> str:
 
 LINE_TOKEN = _env("PAPERS_LINE_CHANNEL_ACCESS_TOKEN")
 LINE_TARGET = _env("PAPERS_LINE_TARGET_USER_ID")
-ANTHROPIC_KEY = _env("ANTHROPIC_API_KEY")
+GEMINI_KEY = _env("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 
 def http_get_json(url: str, headers: dict | None = None, timeout: int = 30,
@@ -276,8 +278,8 @@ def collect_papers() -> list[dict]:
     return bucket
 
 
-def claude_summarize(title: str, abstract: str) -> str:
-    """請 Claude 用兩段繁中說明這篇論文的核心貢獻"""
+def gemini_summarize(title: str, abstract: str) -> str:
+    """請 Gemini 用兩段繁中說明這篇論文的核心貢獻（免費 API）"""
     prompt = (
         f"請用繁體中文，分成兩段說明這篇論文的核心貢獻。\n\n"
         f"標題：{title}\n\n"
@@ -289,26 +291,29 @@ def claude_summarize(title: str, abstract: str) -> str:
         f"・兩段加總不超過 220 字\n"
         f"・若摘要為英文，請翻譯成中文，不可直接照貼英文"
     )
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}"
+    )
     body = json.dumps({
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 500,
-        "messages": [{"role": "user", "content": prompt}],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "maxOutputTokens": 500,
+            "temperature": 0.3,
+        },
     }).encode()
 
     req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
+        url,
         data=body,
-        headers={
-            "x-api-key": ANTHROPIC_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
+        headers={"content-type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read().decode())
-        text = data["content"][0]["text"].strip()
+        # Gemini 回應結構：candidates[0].content.parts[0].text
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         # 雙重保險：清掉 markdown 殘留
         text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
         text = re.sub(r"(?m)^\s*[#>]+\s*", "", text)
@@ -414,10 +419,10 @@ def main() -> None:
     selected = random.sample(pool, min(TOP_N, len(pool)))
     print(f"今日選出：{len(selected)} 篇", flush=True)
 
-    # 逐篇 Claude 摘要
+    # 逐篇 Gemini 摘要
     for i, p in enumerate(selected, 1):
         print(f"  [{i}/{len(selected)}] 摘要 {p.get('title', '')[:50]}...", flush=True)
-        p["_summary"] = claude_summarize(p["title"], p["abstract"])
+        p["_summary"] = gemini_summarize(p["title"], p["abstract"])
 
     msg = format_message(selected)
     print("---- 訊息預覽 ----", flush=True)
