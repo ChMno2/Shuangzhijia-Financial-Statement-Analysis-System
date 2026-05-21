@@ -15,7 +15,8 @@ load_dotenv()
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+# 預設 flash-lite：免費 RPD 1500（flash 才 250 容易被擋）
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 AGENT_SYSTEM_PROMPT = """你是雙之家的商業智慧分析師。雙之家販售日本進口商品（服飾、醫藥、食品、雜貨），有光復、新埔等營業點。
 

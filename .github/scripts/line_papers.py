@@ -68,7 +68,9 @@ def _env(name: str) -> str:
 LINE_TOKEN = _env("PAPERS_LINE_CHANNEL_ACCESS_TOKEN")
 LINE_TARGET = _env("PAPERS_LINE_TARGET_USER_ID")
 GEMINI_KEY = _env("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+# gemini-2.0-flash-lite：免費額度 1500 req/天（比 gemini-2.0-flash 的 250 req/天大 6 倍）
+# 品質微降但摘要任務夠用
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 
 def http_get_json(url: str, headers: dict | None = None, timeout: int = 30,
@@ -299,21 +301,30 @@ def collect_papers() -> list[dict]:
     return bucket
 
 
-def _gemini_call(prompt: str, max_output_tokens: int = 2500) -> str:
-    """呼叫 Gemini generateContent，含 429 退避重試"""
+def _gemini_call(prompt: str, max_output_tokens: int = 4096,
+                 response_schema: dict | None = None) -> str:
+    """
+    呼叫 Gemini generateContent，含 429 退避重試
+    response_schema：若給定，Gemini 會強制回傳符合此 JSON Schema 的內容
+    """
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}"
     )
+    gen_config = {
+        "maxOutputTokens": max_output_tokens,
+        "temperature": 0.3,
+    }
+    if response_schema is not None:
+        gen_config["responseMimeType"] = "application/json"
+        gen_config["responseSchema"] = response_schema
+
     body = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "maxOutputTokens": max_output_tokens,
-            "temperature": 0.3,
-        },
+        "generationConfig": gen_config,
     }).encode()
 
-    delay = 10.0  # Gemini 免費 ~15 req/min，遇 429 等久一點
+    delay = 10.0
     for attempt in range(4):
         req = urllib.request.Request(
             url,
@@ -322,14 +333,14 @@ def _gemini_call(prompt: str, max_output_tokens: int = 2500) -> str:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=90) as resp:
+            with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode())
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < 3:
                 print(f"⏳ Gemini 429，等 {delay:.0f} 秒後重試 ({attempt + 1}/4)", flush=True)
                 time.sleep(delay)
-                delay *= 1.5  # 10, 15, 22 秒
+                delay *= 1.5
                 continue
             raise
 
@@ -344,53 +355,70 @@ def _clean_markdown(text: str) -> str:
 
 def gemini_summarize_batch(papers: list[dict]) -> dict[int, str]:
     """
-    一次性把多篇論文丟給 Gemini 摘要（節省 API 呼叫次數 + 避開 rate limit）
+    一次性把多篇論文丟給 Gemini 摘要（用 JSON 結構化輸出確保格式正確）
     回傳 {paper_index: summary_text}
     """
     sections = []
     for i, p in enumerate(papers, 1):
         sections.append(
-            f"===PAPER_{i}===\n"
+            f"[第{i}篇]\n"
             f"標題：{p.get('title', '')}\n"
             f"摘要：{(p.get('abstract') or '')[:1500]}"
         )
     papers_block = "\n\n".join(sections)
 
     prompt = (
-        f"請為以下 {len(papers)} 篇論文，各寫兩段繁體中文摘要說明其核心貢獻。\n\n"
+        f"請為以下 {len(papers)} 篇論文，各寫一段「兩段式」繁體中文摘要說明其核心貢獻，"
+        f"以 JSON 陣列回傳。\n\n"
         f"{papers_block}\n\n"
-        f"=== 撰寫規則（必須嚴格遵守）===\n"
-        f"・每篇論文兩段：第一段說「解決什麼問題 + 用什麼方法」，第二段說「最有特色的貢獻/突破/影響」\n"
-        f"・每段 1~2 句，每篇兩段加總不超過 220 字\n"
-        f"・若原摘要為英文，請翻譯成中文（不可照貼英文）\n"
-        f"・全文純文字，禁用 markdown 符號（# * _ > ` 等）\n\n"
-        f"=== 回覆格式（必須嚴格遵守）===\n"
-        f"用以下分隔符區分每篇論文的摘要：\n"
-        f"===SUMMARY_1===\n"
-        f"<第一段>\n\n<第二段>\n"
-        f"===SUMMARY_2===\n"
-        f"<第一段>\n\n<第二段>\n"
-        f"... 依此類推到 ===SUMMARY_{len(papers)}===\n"
-        f"最後加上 ===END===\n"
+        f"=== 每篇摘要撰寫規則 ===\n"
+        f"・第一段：解決什麼問題 + 用什麼方法（1~2 句）\n"
+        f"・第二段：與既有方法相比最有特色的貢獻 / 突破 / 影響（1~2 句）\n"
+        f"・第一段和第二段用一個空行 (兩個換行) 分隔\n"
+        f"・每篇加總不超過 220 字\n"
+        f"・原摘要為英文時請翻譯成中文（不可照貼英文）\n"
+        f"・純文字，禁用 markdown 符號（# * _ > ` 等）\n"
     )
 
+    # Gemini 結構化輸出 schema：強制回 [{index:1, summary:"..."}, ...]
+    schema = {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "index":   {"type": "INTEGER"},
+                "summary": {"type": "STRING"},
+            },
+            "required": ["index", "summary"],
+        },
+    }
+
     try:
-        raw = _gemini_call(prompt, max_output_tokens=2500)
+        raw = _gemini_call(prompt, max_output_tokens=4096, response_schema=schema)
     except Exception as e:
         print(f"⚠️ Gemini batch 呼叫失敗：{e}", flush=True)
         return {}
 
-    # 用 regex 切出每篇摘要
+    # 解析 JSON
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"⚠️ Gemini 回應非合法 JSON：{e}", flush=True)
+        print(f"   原始回應前 500 字：{raw[:500]}", flush=True)
+        return {}
+
     results: dict[int, str] = {}
-    pattern = re.compile(
-        r"===SUMMARY_(\d+)===\s*\n(.*?)(?=\n===SUMMARY_\d+===|\n===END===|\Z)",
-        re.DOTALL,
-    )
-    for match in pattern.finditer(raw):
-        idx = int(match.group(1))
-        text = _clean_markdown(match.group(2))
-        if text:
-            results[idx] = text
+    if isinstance(parsed, list):
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            text = item.get("summary", "")
+            if isinstance(idx, int) and text:
+                results[idx] = _clean_markdown(text)
+
+    if not results:
+        print(f"⚠️ 解析到 0 篇摘要，原始 JSON：{raw[:500]}", flush=True)
 
     return results
 
