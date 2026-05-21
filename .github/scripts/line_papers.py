@@ -145,86 +145,105 @@ def detect_venue_from_comment(comment: str) -> str:
     return "arXiv"
 
 
-def search_arxiv(topic: str, max_results: int = 30) -> list[dict]:
+def _reconstruct_abstract(inverted_index: dict | None) -> str:
+    """OpenAlex 用 inverted index 儲存摘要 → 還原成連續文字"""
+    if not inverted_index:
+        return ""
+    positions = []
+    for word, pos_list in inverted_index.items():
+        for p in pos_list:
+            positions.append((p, word))
+    positions.sort()
+    return " ".join(word for _, word in positions)
+
+
+def search_openalex(topic: str, max_results: int = 30) -> list[dict]:
     """
-    從 arXiv API 搜尋論文（無 rate limit、所有頂會論文都會放這）
+    從 OpenAlex API 搜尋論文（限速寬鬆 ~10 req/s、無需 API key、有引用數）
     回傳已過濾的論文清單（normalized format）
     """
-    # arXiv search syntax: '+' 在 search_query 內代表 AND
-    plus_joined = "+AND+".join(f"all:{urllib.parse.quote(w)}" for w in topic.split())
-    url = (
-        f"http://export.arxiv.org/api/query"
-        f"?search_query={plus_joined}"
-        f"&start=0&max_results={max_results}"
-        f"&sortBy=submittedDate&sortOrder=descending"
+    params = {
+        "search": topic,
+        "filter": "publication_year:2024-2026",
+        "per_page": str(max_results),
+        "sort": "cited_by_count:desc",   # 引用數高→低排序
+    }
+    url = "https://api.openalex.org/works?" + urllib.parse.urlencode(params)
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "shuangzhijia-papers-bot/1.0",
+            "Accept": "application/json",
+        },
     )
 
-    req = urllib.request.Request(url, headers={"User-Agent": "shuangzhijia-papers-bot/1.0"})
-
-    # arXiv 偶爾會 429（共用 IP 流量大）；指數退避重試
-    xml_bytes = None
-    delay = 5.0
+    # OpenAlex 偶爾會抖；輕量重試
+    data = None
+    delay = 3.0
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=40) as resp:
-                xml_bytes = resp.read()
+                data = json.loads(resp.read().decode())
             break
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 2:
-                print(f"⏳ arXiv 429，等 {delay:.0f} 秒後重試 ({attempt + 1}/3)", flush=True)
+            if e.code in (429, 503) and attempt < 2:
+                print(f"⏳ OpenAlex {e.code}，等 {delay:.0f} 秒後重試", flush=True)
                 time.sleep(delay)
-                delay *= 2  # 5, 10
+                delay *= 2
                 continue
-            print(f"⚠️ arXiv HTTP 失敗：{e}", flush=True)
+            print(f"⚠️ OpenAlex HTTP 失敗：{e}", flush=True)
             return []
         except Exception as e:
-            print(f"⚠️ arXiv 連線失敗：{e}", flush=True)
+            print(f"⚠️ OpenAlex 連線失敗：{e}", flush=True)
             return []
 
-    if xml_bytes is None:
-        return []
-
-    try:
-        root = ET.fromstring(xml_bytes)
-    except ET.ParseError as e:
-        print(f"⚠️ arXiv XML 解析失敗：{e}", flush=True)
+    if not data:
         return []
 
     papers = []
-    for entry in root.findall(f"{ATOM_NS}entry"):
-        title = (entry.findtext(f"{ATOM_NS}title") or "").strip().replace("\n", " ").replace("  ", " ")
-        abstract = (entry.findtext(f"{ATOM_NS}summary") or "").strip().replace("\n", " ").replace("  ", " ")
-        published = (entry.findtext(f"{ATOM_NS}published") or "").strip()
-        id_str = (entry.findtext(f"{ATOM_NS}id") or "").strip()
+    for work in data.get("results", []):
+        title = (work.get("display_name") or "").strip().replace("\n", " ")
+        abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+        if not abstract:
+            continue  # 沒摘要無法生成「兩段話」貢獻說明
 
-        # 解析 arxiv ID（去掉版本號 v1/v2）
-        arxiv_id = id_str.split("/abs/")[-1] if "/abs/" in id_str else id_str.rsplit("/", 1)[-1]
-        arxiv_id_clean = re.sub(r"v\d+$", "", arxiv_id)
-
-        # 發布時間
-        published_dt = None
-        if published:
+        # 發布日期
+        pub_dt = None
+        pub_date_str = work.get("publication_date") or ""
+        if pub_date_str:
             try:
-                published_dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
-                published_dt = published_dt.replace(tzinfo=None)
+                pub_dt = datetime.fromisoformat(pub_date_str)
             except ValueError:
                 pass
 
-        year = published_dt.year if published_dt else None
-
-        # 年份過濾
+        year = work.get("publication_year") or (pub_dt.year if pub_dt else None)
         if year is None or year < 2024:
             continue
 
-        # 類別過濾：必須包含至少一個 AI/ML 類別
-        cats = [c.attrib.get("term") for c in entry.findall(f"{ATOM_NS}category")]
-        if not any(c in AI_CATEGORIES for c in cats):
-            continue
+        # venue：取 primary_location 的 source name
+        primary = work.get("primary_location") or {}
+        source = primary.get("source") or {}
+        venue = (source.get("display_name") or "").strip() or "—"
 
-        # 從 comment 欄抓 venue（許多論文會註明 accepted to ...）
-        comment_el = entry.find(f"{ARXIV_NS}comment")
-        comment = comment_el.text if comment_el is not None and comment_el.text else ""
-        venue = detect_venue_from_comment(comment)
+        # 抓 arXiv ID（OpenAlex 會把 arXiv 當 source 之一）
+        arxiv_id = None
+        for loc in (work.get("locations") or []):
+            src_name = ((loc.get("source") or {}).get("display_name") or "").lower()
+            if "arxiv" in src_name:
+                landing = loc.get("landing_page_url") or ""
+                m = re.search(r"/abs/([\w.\-/]+)", landing)
+                if m:
+                    arxiv_id = re.sub(r"v\d+$", "", m.group(1).rstrip("/"))
+                    break
+
+        # URL 優先序：arXiv > primary landing > openalex id
+        if arxiv_id:
+            paper_url = f"https://arxiv.org/abs/{arxiv_id}"
+        elif primary.get("landing_page_url"):
+            paper_url = primary["landing_page_url"]
+        else:
+            paper_url = work.get("id") or ""
 
         papers.append({
             "title": title,
@@ -232,36 +251,35 @@ def search_arxiv(topic: str, max_results: int = 30) -> list[dict]:
             "year": year,
             "venue": venue,
             "_venue": venue,
-            "url": f"https://arxiv.org/abs/{arxiv_id_clean}",
-            "published_dt": published_dt,
-            "arxiv_id": arxiv_id_clean,
-            "categories": cats,
-            "_source": "arxiv",
+            "url": paper_url,
+            "published_dt": pub_dt,
+            "arxiv_id": arxiv_id,
+            "citationCount": work.get("cited_by_count", 0),
+            "_source": "openalex",
         })
 
     return papers
 
 
 def collect_papers() -> list[dict]:
-    """跑所有主題 → 過濾 → 去重 → 排序（用 arXiv 為主要來源）"""
+    """跑所有主題 → 過濾 → 去重 → 排序（OpenAlex 為主要來源）"""
     seen: set[str] = set()
     bucket: list[dict] = []
 
     for idx, topic in enumerate(TOPIC_QUERIES):
         if idx > 0:
-            time.sleep(5.0)  # arXiv 官方建議「至少 3 秒一次」，保守設 5 秒
-        print(f"搜尋 [{topic}] (arXiv) ...", flush=True)
-        papers = search_arxiv(topic, max_results=SEARCH_LIMIT_PER_TOPIC)
+            time.sleep(1.5)  # OpenAlex 限速寬鬆，1.5 秒間隔保險
+        print(f"搜尋 [{topic}] (OpenAlex) ...", flush=True)
+        papers = search_openalex(topic, max_results=SEARCH_LIMIT_PER_TOPIC)
 
         kept = 0
         for p in papers:
-            # 用 arxiv_id 去重（不同主題可能撈到同一篇）
+            # 用 arxiv_id 或 title 去重
             pid = p.get("arxiv_id") or p.get("title")
             if pid in seen:
                 continue
             seen.add(pid)
 
-            # 必須有摘要
             if not p.get("abstract"):
                 continue
 
@@ -270,9 +288,12 @@ def collect_papers() -> list[dict]:
             kept += 1
         print(f"   → 入選 {kept} 篇", flush=True)
 
-    # 排序：發布時間遞減（最新優先）
+    # 排序：引用數遞減（最有影響力）→ 同分用發布日期當 tiebreaker
     bucket.sort(
-        key=lambda p: p.get("published_dt") or datetime.min,
+        key=lambda p: (
+            p.get("citationCount") or 0,
+            (p.get("published_dt") or datetime.min).timestamp(),
+        ),
         reverse=True,
     )
     return bucket
@@ -345,8 +366,9 @@ def format_message(papers: list[dict]) -> str:
 
     for i, p in enumerate(papers, 1):
         title = (p.get("title") or "").strip()
-        venue = p.get("_venue", "arXiv")
+        venue = p.get("_venue", "—")
         year = p.get("year", "—")
+        cites = p.get("citationCount") or 0
         url = get_paper_url(p)
         summary = p.get("_summary", "")
 
@@ -354,9 +376,12 @@ def format_message(papers: list[dict]) -> str:
         pub_dt = p.get("published_dt")
         date_str = pub_dt.strftime("%Y-%m-%d") if pub_dt else str(year)
 
+        # 引用數顯示
+        cite_str = f"被引 {cites}" if cites > 0 else "尚無引用"
+
         lines.append("")
         lines.append(f"━━ {i}. {title}")
-        lines.append(f"📌 {venue} · {date_str}")
+        lines.append(f"📌 {venue} · {date_str} · {cite_str}")
         lines.append(f"🔗 {url}")
         lines.append("")
         lines.append(summary)
