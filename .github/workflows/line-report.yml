@@ -2,8 +2,9 @@ name: LINE 雙之家 AI 週報（每週日 16:00）
 
 on:
   schedule:
-    # 每週日台灣時間 16:00 = UTC 週日 08:00
-    - cron: '0 8 * * 0'
+    # 目標：每週日台灣 16:00；UTC 週日 07:47 = 週日台灣 15:47
+    # 非整點分鐘 + 提早 13 分鐘吃掉 GHA cron 延遲
+    - cron: '47 7 * * 0'
 
   workflow_dispatch:
 

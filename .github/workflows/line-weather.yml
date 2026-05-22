@@ -2,8 +2,9 @@ name: LINE 每日天氣預報（上午 10 點推明日）
 
 on:
   schedule:
-    # 每日台灣時間 10:00 = UTC 02:00（推送「明日」天氣）
-    - cron: '0 2 * * *'
+    # 目標：台灣 10:00；UTC 01:47 = 台灣 09:47
+    # 非整點分鐘 + 提早 13 分鐘吃掉 GHA cron 延遲
+    - cron: '47 1 * * *'
 
   workflow_dispatch:
 

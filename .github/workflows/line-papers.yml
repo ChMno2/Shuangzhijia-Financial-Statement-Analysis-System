@@ -2,8 +2,9 @@ name: LINE AI 論文精選（上午 8 點）
 
 on:
   schedule:
-    # 每日台灣時間 08:00 = UTC 00:00
-    - cron: '0 0 * * *'
+    # 目標：台灣 08:00 推送；UTC 23:47 (前一日) = 台灣 07:47
+    # 用非整點分鐘 + 提早 13 分鐘吃掉 GitHub Actions cron 通常 ~15 分鐘的延遲
+    - cron: '47 23 * * *'
 
   workflow_dispatch:
 

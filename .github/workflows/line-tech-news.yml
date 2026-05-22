@@ -2,8 +2,9 @@ name: LINE 科技新聞推播（上午 10 點）
 
 on:
   schedule:
-    # 每日台灣時間 10:00 = UTC 02:00
-    - cron: '0 2 * * *'
+    # 目標：台灣 10:00；UTC 01:52 = 台灣 09:52
+    # 與天氣排程錯開 5 分鐘避免同時搶 runner
+    - cron: '52 1 * * *'
 
   workflow_dispatch:
 
