@@ -67,10 +67,19 @@ def _env(name: str) -> str:
 
 LINE_TOKEN = _env("PAPERS_LINE_CHANNEL_ACCESS_TOKEN")
 LINE_TARGET = _env("PAPERS_LINE_TARGET_USER_ID")
-GEMINI_KEY = _env("GEMINI_API_KEY")
-# gemini-2.0-flash-lite：免費額度 1500 req/天（比 gemini-2.0-flash 的 250 req/天大 6 倍）
-# 品質微降但摘要任務夠用
+
+# 摘要引擎切換：LLM_PROVIDER=claude (預設) / gemini
+# Claude 預設用 claude-haiku-4-5（便宜小模型，論文摘要這種結構任務夠用）
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "claude").lower()
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
+
+if LLM_PROVIDER == "claude" and not ANTHROPIC_KEY:
+    raise SystemExit("❌ LLM_PROVIDER=claude 但未設 ANTHROPIC_API_KEY")
+if LLM_PROVIDER == "gemini" and not GEMINI_KEY:
+    raise SystemExit("❌ LLM_PROVIDER=gemini 但未設 GEMINI_API_KEY")
 
 
 def http_get_json(url: str, headers: dict | None = None, timeout: int = 30,
@@ -359,6 +368,60 @@ def _clean_markdown(text: str) -> str:
     return text.strip()
 
 
+def claude_summarize_single(title: str, abstract: str) -> str | None:
+    """單篇 Claude 摘要（用 claude-haiku-4-5 等小模型，便宜快速）；失敗回 None"""
+    prompt = (
+        f"請用繁體中文，分成兩段說明這篇論文的核心貢獻。\n\n"
+        f"標題：{title}\n\n"
+        f"摘要：{(abstract or '')[:1500]}\n\n"
+        f"規則：\n"
+        f"・第一段：論文解決什麼問題 + 用什麼方法（1~2 句）\n"
+        f"・第二段：與既有方法相比最有特色的貢獻 / 突破 / 影響（1~2 句）\n"
+        f"・第一段和第二段用空行分隔\n"
+        f"・兩段加總不超過 220 字，純文字，禁用 markdown 符號（# * _ > ` 等）\n"
+        f"・原文為英文時請翻譯成中文，不可照貼英文"
+    )
+    body = json.dumps({
+        "model": CLAUDE_MODEL,
+        "max_tokens": 600,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "x-api-key": ANTHROPIC_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode())
+        text = data["content"][0]["text"].strip()
+        return _clean_markdown(text)
+    except urllib.error.HTTPError as e:
+        err = ""
+        try:
+            err = e.read().decode()[:300]
+        except Exception:
+            pass
+        print(f"⚠️ Claude HTTP {e.code}：{err}", flush=True)
+        return None
+    except Exception as e:
+        print(f"⚠️ Claude 單篇摘要失敗：{e}", flush=True)
+        return None
+
+
+def summarize_single(title: str, abstract: str) -> str | None:
+    """依 LLM_PROVIDER 路由到對應引擎"""
+    if LLM_PROVIDER == "claude":
+        return claude_summarize_single(title, abstract)
+    return gemini_summarize_single(title, abstract)
+
+
 def gemini_summarize_single(title: str, abstract: str) -> str | None:
     """單篇摘要（簡單 prompt，回傳兩段純文字）；失敗回 None"""
     prompt = (
@@ -549,20 +612,24 @@ def main() -> None:
     selected = random.sample(pool, min(TOP_N, len(pool)))
     print(f"今日選出：{len(selected)} 篇", flush=True)
 
-    # 逐篇 Gemini 摘要 — 每篇間隔 15 秒，分散到 RPM 視窗外避免 rate limit
-    # （batch 模式雖然省 quota 但 5 篇丟在同一秒容易撞 RPM 上限）
-    print(f"  Gemini 逐篇摘要 {len(selected)} 篇（每篇間隔 15 秒避開 rate limit）...", flush=True)
+    # 逐篇摘要（依 LLM_PROVIDER 路由）
+    # Claude 速率限制寬鬆，不需要 sleep；Gemini 免費版需間隔避開 RPM
+    need_sleep = LLM_PROVIDER == "gemini"
+    print(
+        f"  {LLM_PROVIDER.upper()} 逐篇摘要 {len(selected)} 篇"
+        + ("（每篇間隔 15 秒避開 Gemini rate limit）" if need_sleep else "") + " ...",
+        flush=True,
+    )
     success_count = 0
     for i, p in enumerate(selected, 1):
-        if i > 1:
+        if i > 1 and need_sleep:
             time.sleep(15)
         print(f"  [{i}/{len(selected)}] 摘要：{p.get('title', '')[:55]}", flush=True)
-        summary = gemini_summarize_single(p["title"], p["abstract"])
+        summary = summarize_single(p["title"], p["abstract"])
         if summary:
             p["_summary"] = summary
             success_count += 1
         else:
-            # fallback：顯示原始摘要節錄
             p["_summary"] = (
                 f"（自動摘要不可用，以下為原始摘要節錄）\n"
                 f"{(p.get('abstract') or '')[:250]}..."

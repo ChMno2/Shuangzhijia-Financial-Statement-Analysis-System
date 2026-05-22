@@ -20,5 +20,8 @@ jobs:
         env:
           PAPERS_LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.PAPERS_LINE_CHANNEL_ACCESS_TOKEN }}
           PAPERS_LINE_TARGET_USER_ID: ${{ secrets.PAPERS_LINE_TARGET_USER_ID }}
+          # 摘要引擎：預設 claude（claude-haiku-4-5 便宜小模型）；可設 LLM_PROVIDER=gemini 切換
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'claude' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python .github/scripts/line_papers.py
