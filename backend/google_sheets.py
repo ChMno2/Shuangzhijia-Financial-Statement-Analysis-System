@@ -62,7 +62,12 @@ def parse_sheet_period(name: str):
     return None
 
 
-MASTER_SHEET_NAMES = ("總表", "總覽", "master", "Master", "MASTER")
+MASTER_SHEET_NAMES = {"總表", "總覽", "master", "Master", "MASTER"}
+
+
+def _normalize_sheet_name(name: str) -> str:
+    """容忍前後空白、方括號、書名號等修飾"""
+    return name.strip().strip("[]【】「」「」").strip()
 
 
 def get_recent_sheet_names(xl: pd.ExcelFile, months: int = 12) -> list:
@@ -71,11 +76,14 @@ def get_recent_sheet_names(xl: pd.ExcelFile, months: int = 12) -> list:
     優先順序：
       1) 若有「總表」之類的 master sheet → 只讀它（避免和日期分頁的舊資料重複）
       2) 否則 → 讀最近 N 個月的日期分頁（YYYYMMDD / YYMMDD 命名）
+    對 master sheet 名稱會做容錯比對（前後空白、方括號等不影響匹配）。
     """
-    # 1. 優先用 master sheet
-    for ms in MASTER_SHEET_NAMES:
-        if ms in xl.sheet_names:
-            return [ms]
+    # 1. 優先用 master sheet（容忍空白 / 方括號）
+    print(f"[get_recent_sheet_names] 所有 sheet: {xl.sheet_names}", flush=True)
+    for sheet in xl.sheet_names:
+        if _normalize_sheet_name(sheet) in MASTER_SHEET_NAMES:
+            print(f"[get_recent_sheet_names] 命中 master sheet：'{sheet}'", flush=True)
+            return [sheet]  # 回傳原始名稱（含原本的空白／符號）給 xl.parse
 
     # 2. fallback：原本的日期分頁邏輯
     today = datetime.today()
