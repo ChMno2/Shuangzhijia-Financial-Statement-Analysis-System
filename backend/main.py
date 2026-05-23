@@ -591,19 +591,21 @@ def get_last_line_source(user: str = Depends(get_current_user)):
 def line_daily_brief(user: str = Depends(get_current_user)):
     """
     LINE 每日速報專用 endpoint — 一次拿完所有必要資料：
-    - 最新一天的營收、淨利、毛利率
+    - 「今日」（呼叫當下的日期）的營收、淨利、毛利率
     - 該日 TOP 3 商品 + 個別銷售金額
     - 近 30 天累計營收 / 交易筆數
+
+    若今日 Google Sheet 沒有對應日期的紀錄 → has_data=False，
+    line_daily_report 腳本會跳過推送（避免推「資料日期：5/20」這種誤導）
     """
-    get_data()
+    # 強制刷新確保抓到 Google Sheet 上的最新資料
+    get_data(force_refresh=True)
     if _cached_sales_df is None or _cached_sales_df.empty:
         raise HTTPException(status_code=503, detail="尚無銷售資料")
 
     df = _cached_sales_df
-    latest = df["_date"].max()
-    today_clamped = pd.Timestamp(datetime.today().date())
-    # 用「最新一筆資料的日期」當作「今天」（與儀表板邏輯一致，已夾在今天以內）
-    target_date = min(latest, today_clamped) if pd.notna(latest) else today_clamped
+    # 「今日」=呼叫當下的日期；不 fallback 到資料最新日期
+    target_date = pd.Timestamp(datetime.today().date())
 
     today_df = df[df["_date"].dt.date == target_date.date()]
     today_revenue = float(today_df["_sales"].sum()) if not today_df.empty else 0.0

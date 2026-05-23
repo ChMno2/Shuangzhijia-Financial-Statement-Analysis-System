@@ -20,7 +20,15 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# 強制以台北時區判斷「今天/明天」，避免 GHA runner 用 UTC 時跨日錯算
+# （凌晨 4 點 Taiwan 在 UTC 還是「昨天」，+1 天會變成今天而非明天）
+TAIPEI_TZ = timezone(timedelta(hours=8))
+
+
+def now_taipei() -> datetime:
+    return datetime.now(TAIPEI_TZ).replace(tzinfo=None)
 
 
 def _env(name: str) -> str:
@@ -76,8 +84,8 @@ def fetch_township_weather(dataset_id: str, township: str, day_offset: int = 1) 
     except (KeyError, IndexError):
         return None
 
-    # 目標日 = 今天 + day_offset，整個日曆日（00:00 ~ 24:00）
-    target_day = (datetime.now() + timedelta(days=day_offset)).date()
+    # 目標日 = 今天（台北時區）+ day_offset，整個日曆日（00:00 ~ 24:00）
+    target_day = (now_taipei() + timedelta(days=day_offset)).date()
     day_start = datetime.combine(target_day, datetime.min.time())
     day_end = day_start + timedelta(days=1)
 
@@ -192,7 +200,7 @@ def build_advice(w: dict) -> str:
 def format_message() -> str:
     # 預設預報「明天」（day_offset=1）；可由環境變數 WEATHER_DAY_OFFSET 覆寫
     day_offset = int(os.environ.get("WEATHER_DAY_OFFSET", "1"))
-    target = datetime.now() + timedelta(days=day_offset)
+    target = now_taipei() + timedelta(days=day_offset)
     label_map = {0: "今日", 1: "明日", 2: "後天"}
     day_label = label_map.get(day_offset, f"+{day_offset}日")
     date_str = target.strftime("%-m/%-d") if os.name != "nt" else target.strftime("%#m/%#d")
