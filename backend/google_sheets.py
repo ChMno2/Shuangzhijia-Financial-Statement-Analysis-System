@@ -62,8 +62,22 @@ def parse_sheet_period(name: str):
     return None
 
 
+MASTER_SHEET_NAMES = ("總表", "總覽", "master", "Master", "MASTER")
+
+
 def get_recent_sheet_names(xl: pd.ExcelFile, months: int = 12) -> list:
-    """取得最近 N 個月內的工作表名稱（依日期排序）"""
+    """
+    取得要讀的工作表名稱清單。
+    優先順序：
+      1) 若有「總表」之類的 master sheet → 只讀它（避免和日期分頁的舊資料重複）
+      2) 否則 → 讀最近 N 個月的日期分頁（YYYYMMDD / YYMMDD 命名）
+    """
+    # 1. 優先用 master sheet
+    for ms in MASTER_SHEET_NAMES:
+        if ms in xl.sheet_names:
+            return [ms]
+
+    # 2. fallback：原本的日期分頁邏輯
     today = datetime.today()
     cutoff_year = today.year
     cutoff_month = today.month - months
