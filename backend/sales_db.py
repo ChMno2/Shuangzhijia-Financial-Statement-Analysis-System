@@ -117,11 +117,16 @@ def get_db_latest_date():
 # ─────────────────────────────────────────
 
 def _cutoff(con, days):
+    """
+    回傳「近 N 天」區間的起始日（含當日）。
+    例：days=1 → 只含 latest 那一天；days=30 → 含 latest 往前算 30 天。
+    """
     latest = con.execute("SELECT MAX(date) FROM sales").fetchone()[0]
     if not latest:
         return "2000-01-01"
     latest_dt = datetime.fromisoformat(latest)
-    return (latest_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+    # Off-by-one 修正：days=N 表示恰好包含 N 天
+    return (latest_dt - timedelta(days=max(days - 1, 0))).strftime("%Y-%m-%d")
 
 
 def tool_query_sales(days=30, category=None, location=None, product=None,
