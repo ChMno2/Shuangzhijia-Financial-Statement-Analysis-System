@@ -5,7 +5,7 @@
 內容：
   - 當日營收、淨利、毛利率
   - 當日 TOP 3 商品 + 銷售金額
-  - 近 30 天累計營收 / 交易筆數
+  - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天）
 
 所需環境變數（GitHub Secrets，同週報腳本可重用）：
   BACKEND_API_BASE / BACKEND_USERNAME / BACKEND_PASSWORD
@@ -96,10 +96,17 @@ def format_message(d: dict) -> str:
     else:
         lines.append("💵 今日淨利：— (缺成本資料)")
 
-    lines.append(
-        f"📅 近30天累計：{money(d.get('last_30_days_revenue', 0))}"
-        f"（{d.get('last_30_days_transactions', 0):,} 筆）"
-    )
+    # 後端更新後回傳 month_to_date_*；若後端尚未重啟仍回傳 last_30_days_*，
+    # 此時優雅退回顯示近 30 天，避免出現誤導的 NT$ 0
+    if "month_to_date_revenue" in d:
+        cum_label = "本月累計"
+        cum_rev = d.get("month_to_date_revenue", 0)
+        cum_tx = d.get("month_to_date_transactions", 0)
+    else:
+        cum_label = "近30天累計"
+        cum_rev = d.get("last_30_days_revenue", 0)
+        cum_tx = d.get("last_30_days_transactions", 0)
+    lines.append(f"📅 {cum_label}：{money(cum_rev)}（{cum_tx:,} 筆）")
 
     top = d.get("top_products") or []
     if top:

@@ -593,7 +593,7 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     LINE 每日速報專用 endpoint — 一次拿完所有必要資料：
     - 「今日」（呼叫當下的日期）的營收、淨利、毛利率
     - 該日 TOP 3 商品 + 個別銷售金額
-    - 近 30 天累計營收 / 交易筆數
+    - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天）
 
     若今日 Google Sheet 沒有對應日期的紀錄 → has_data=False，
     line_daily_report 腳本會跳過推送（避免推「資料日期：5/20」這種誤導）
@@ -631,12 +631,11 @@ def line_daily_brief(user: str = Depends(get_current_user)):
         for name, rev in top.items():
             top3.append({"name": str(name), "revenue": round(float(rev), 0)})
 
-    # 近 30 天累計（含今天）
-    from datetime import timedelta as _td
-    cutoff = target_date - _td(days=29)
-    last_30 = df[(df["_date"] >= cutoff) & (df["_date"] <= target_date)]
-    last_30_revenue = round(float(last_30["_sales"].sum()), 0) if not last_30.empty else 0.0
-    last_30_transactions = int(len(last_30))
+    # 本月累計（當月 1 號 ~ 今天）
+    month_start = target_date.replace(day=1)
+    mtd = df[(df["_date"] >= month_start) & (df["_date"] <= target_date)]
+    mtd_revenue = round(float(mtd["_sales"].sum()), 0) if not mtd.empty else 0.0
+    mtd_transactions = int(len(mtd))
 
     return {
         "date": str(target_date.date()),
@@ -644,8 +643,9 @@ def line_daily_brief(user: str = Depends(get_current_user)):
         "profit": today_profit,
         "margin": today_margin,
         "top_products": top3,
-        "last_30_days_revenue": last_30_revenue,
-        "last_30_days_transactions": last_30_transactions,
+        "month_start": str(month_start.date()),
+        "month_to_date_revenue": mtd_revenue,
+        "month_to_date_transactions": mtd_transactions,
         "has_data": not today_df.empty,
     }
 
