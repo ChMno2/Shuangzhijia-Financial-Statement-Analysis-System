@@ -1,0 +1,27 @@
+name: Keepalive（防止排程 workflow 被自動停用）
+
+on:
+  schedule:
+    # 每月 1 號 UTC 00:00 空提交一次，遠低於 GitHub 60 天無活動的停用門檻
+    - cron: '0 0 1 * *'
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update keepalive timestamp
+        run: date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/.keepalive
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/.keepalive
+          git diff --staged --quiet || git commit -m "chore: keepalive commit to prevent scheduled workflows from being auto-disabled"
+          git push
