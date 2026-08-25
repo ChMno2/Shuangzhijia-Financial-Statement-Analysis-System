@@ -593,7 +593,10 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     LINE 每日速報專用 endpoint — 一次拿完所有必要資料：
     - 「今日」（呼叫當下的日期）的營收、淨利、毛利率
     - 該日 TOP 3 商品 + 個別銷售金額
-    - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天）
+    - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天），並依星期幾拆分營業點：
+      週一～三＝光復、週四～日＝新埔
+    - 明日預計準備商品：抓「明天」是星期幾，取過去 4 週同星期營業資料中
+      總銷售金額最高的 2 個大類
 
     若今日 Google Sheet 沒有對應日期的紀錄 → has_data=False，
     line_daily_report 腳本會跳過推送（避免推「資料日期：5/20」這種誤導）
@@ -637,6 +640,33 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     mtd_revenue = round(float(mtd["_sales"].sum()), 0) if not mtd.empty else 0.0
     mtd_transactions = int(len(mtd))
 
+    # 本月累計依營業點拆分：週一～三＝光復，週四～日＝新埔
+    # （依星期幾固定排班，不依賴 Google Sheet 上的「營業點」欄位是否有填）
+    guangfu_revenue = xinpu_revenue = 0.0
+    guangfu_transactions = xinpu_transactions = 0
+    if not mtd.empty:
+        mtd_weekday = mtd["_date"].dt.dayofweek
+        guangfu_mask = mtd_weekday.isin([0, 1, 2])  # 一二三
+        xinpu_mask = mtd_weekday.isin([3, 4, 5, 6])  # 四五六日
+        guangfu_revenue = round(float(mtd.loc[guangfu_mask, "_sales"].sum()), 0)
+        guangfu_transactions = int(guangfu_mask.sum())
+        xinpu_revenue = round(float(mtd.loc[xinpu_mask, "_sales"].sum()), 0)
+        xinpu_transactions = int(xinpu_mask.sum())
+
+    # 明日預計準備商品：抓「明天」這個星期幾，過去 4 週的銷售資料，
+    # 取總銷售金額最高的 2 個大類，作為明天擺攤的準備建議
+    tomorrow_date = target_date + pd.Timedelta(days=1)
+    recommended_categories = []
+    if "大類" in df.columns:
+        past_same_weekday = [tomorrow_date - pd.Timedelta(days=7 * k) for k in (1, 2, 3, 4)]
+        hist = df[df["_date"].dt.date.isin([d.date() for d in past_same_weekday])]
+        if not hist.empty:
+            cat = hist.groupby("大類")["_sales"].sum().nlargest(2)
+            recommended_categories = [
+                {"category": str(name), "revenue": round(float(rev), 0)}
+                for name, rev in cat.items()
+            ]
+
     return {
         "date": str(target_date.date()),
         "revenue": round(today_revenue, 0),
@@ -646,6 +676,12 @@ def line_daily_brief(user: str = Depends(get_current_user)):
         "month_start": str(month_start.date()),
         "month_to_date_revenue": mtd_revenue,
         "month_to_date_transactions": mtd_transactions,
+        "guangfu_month_to_date_revenue": guangfu_revenue,
+        "guangfu_month_to_date_transactions": guangfu_transactions,
+        "xinpu_month_to_date_revenue": xinpu_revenue,
+        "xinpu_month_to_date_transactions": xinpu_transactions,
+        "tomorrow_date": str(tomorrow_date.date()),
+        "recommended_categories": recommended_categories,
         "has_data": not today_df.empty,
     }
 

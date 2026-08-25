@@ -5,7 +5,8 @@
 內容：
   - 當日營收、淨利、毛利率
   - 當日 TOP 3 商品 + 銷售金額
-  - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天）
+  - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天），並拆分光復（一二三）/ 新埔（四五六日）
+  - 明日預計準備商品：依過去 4 週同星期營業資料，總銷售金額最高的 2 個大類
 
 所需環境變數（GitHub Secrets，同週報腳本可重用）：
   BACKEND_API_BASE / BACKEND_USERNAME / BACKEND_PASSWORD
@@ -108,12 +109,29 @@ def format_message(d: dict) -> str:
         cum_tx = d.get("last_30_days_transactions", 0)
     lines.append(f"📅 {cum_label}：{money(cum_rev)}（{cum_tx:,} 筆）")
 
+    if "guangfu_month_to_date_revenue" in d:
+        lines.append(
+            f"　├ 光復累計：{money(d.get('guangfu_month_to_date_revenue', 0))}"
+            f"（{d.get('guangfu_month_to_date_transactions', 0):,} 筆）"
+        )
+        lines.append(
+            f"　└ 新埔累計：{money(d.get('xinpu_month_to_date_revenue', 0))}"
+            f"（{d.get('xinpu_month_to_date_transactions', 0):,} 筆）"
+        )
+
     top = d.get("top_products") or []
     if top:
         lines.append("")
         lines.append("🏆 今日 TOP 3 商品")
         for i, p in enumerate(top, 1):
             lines.append(f"  {i}. {p.get('name', '')} — {money(p.get('revenue', 0))}")
+
+    recommended = d.get("recommended_categories") or []
+    if recommended:
+        lines.append("")
+        lines.append(f"🎒 明日（{d.get('tomorrow_date', '—')}）預計準備")
+        lines.append("  " + "、".join(c.get("category", "") for c in recommended))
+        lines.append("　（依過去 4 週同星期營業資料統計）")
 
     return "\n".join(lines)
 
