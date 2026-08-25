@@ -134,7 +134,7 @@ def format_message(d: dict) -> str:
             lift = c.get("lift")
             lift_str = f"（較平常熱銷 {lift} 倍）" if lift is not None else ""
             lines.append(f"  {i}. {c.get('category', '')} {lift_str}".rstrip())
-        lines.append("　（依過去 8 週同星期資料，相對近 16 週平常水準分析）")
+        lines.append("　（依過去 8 週同星期資料分析）")
 
     return "\n".join(lines)
 
