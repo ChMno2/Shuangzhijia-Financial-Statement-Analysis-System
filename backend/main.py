@@ -595,8 +595,8 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     - 該日 TOP 3 商品 + 個別銷售金額
     - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天），並依星期幾拆分營業點：
       週一～三＝光復、週四～日＝新埔
-    - 明日預計準備商品：抓「明天」是星期幾，取過去 4 週同星期營業資料中
-      總銷售金額最高的 2 個大類
+    - 明日預計準備商品：取「明天」這個星期幾，過去 4 週同星期資料中，
+      相對近 8 週平常水準熱賣倍數（lift）最高的 2 個分類（優先用細分類，無則退回大類）
 
     若今日 Google Sheet 沒有對應日期的紀錄 → has_data=False，
     line_daily_report 腳本會跳過推送（避免推「資料日期：5/20」這種誤導）
@@ -653,19 +653,57 @@ def line_daily_brief(user: str = Depends(get_current_user)):
         xinpu_revenue = round(float(mtd.loc[xinpu_mask, "_sales"].sum()), 0)
         xinpu_transactions = int(xinpu_mask.sum())
 
-    # 明日預計準備商品：抓「明天」這個星期幾，過去 4 週的銷售資料，
-    # 取總銷售金額最高的 2 個大類，作為明天擺攤的準備建議
+    # 明日預計準備商品：找出「明天這個星期幾」相對平常明顯熱賣的類別，
+    # 而不是單純看總金額最高（那樣永遠只會選出服飾/醫藥這種天天都最大宗的類別，沒有指引意義）。
+    #
+    # 作法：
+    #   1. 分類粒度優先用「分類」（較細，如：保暖衣物、襪子），沒有資料才退回「大類」
+    #   2. weekday_share = 該類別在「明天星期幾」過去 4 次出現時的營收佔比
+    #      baseline_share = 該類別在近 8 週（56 天）所有營業日的營收佔比（=「平常」水準）
+    #      lift = weekday_share / baseline_share，倍數越高代表該類別在這個星期幾特別熱賣
+    #   3. 只出現 1 天的類別視為樣本不足；baseline 佔比 < 0.5% 視為太冷門、比值容易失真，都排除
     tomorrow_date = target_date + pd.Timedelta(days=1)
     recommended_categories = []
-    if "大類" in df.columns:
+
+    cat_col = None
+    if "分類" in df.columns and df["分類"].notna().any():
+        cat_col = "分類"
+    elif "大類" in df.columns:
+        cat_col = "大類"
+
+    if cat_col:
         past_same_weekday = [tomorrow_date - pd.Timedelta(days=7 * k) for k in (1, 2, 3, 4)]
-        hist = df[df["_date"].dt.date.isin([d.date() for d in past_same_weekday])]
-        if not hist.empty:
-            cat = hist.groupby("大類")["_sales"].sum().nlargest(2)
-            recommended_categories = [
-                {"category": str(name), "revenue": round(float(rev), 0)}
-                for name, rev in cat.items()
-            ]
+        past_dates = {d.date() for d in past_same_weekday}
+        weekday_pool = df[df["_date"].dt.date.isin(past_dates)]
+
+        baseline_start = target_date - pd.Timedelta(days=56)
+        baseline_pool = df[(df["_date"] > baseline_start) & (df["_date"] <= target_date)]
+
+        if not weekday_pool.empty and not baseline_pool.empty:
+            weekday_cat_rev = weekday_pool.groupby(cat_col)["_sales"].sum()
+            weekday_cat_days = weekday_pool.groupby(cat_col)["_date"].nunique()
+            weekday_total = float(weekday_cat_rev.sum())
+
+            baseline_cat_rev = baseline_pool.groupby(cat_col)["_sales"].sum()
+            baseline_total = float(baseline_cat_rev.sum())
+
+            candidates = []
+            if weekday_total > 0 and baseline_total > 0:
+                for cat, rev in weekday_cat_rev.items():
+                    if weekday_cat_days.get(cat, 0) < 2:
+                        continue
+                    baseline_share = float(baseline_cat_rev.get(cat, 0.0)) / baseline_total
+                    if baseline_share < 0.005:
+                        continue
+                    weekday_share = float(rev) / weekday_total
+                    candidates.append({
+                        "category": str(cat),
+                        "revenue": round(float(rev), 0),
+                        "lift": round(weekday_share / baseline_share, 2),
+                    })
+
+            candidates.sort(key=lambda c: c["lift"], reverse=True)
+            recommended_categories = candidates[:2]
 
     return {
         "date": str(target_date.date()),

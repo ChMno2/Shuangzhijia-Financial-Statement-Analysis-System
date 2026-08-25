@@ -6,7 +6,7 @@
   - 當日營收、淨利、毛利率
   - 當日 TOP 3 商品 + 銷售金額
   - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天），並拆分光復（一二三）/ 新埔（四五六日）
-  - 明日預計準備商品：依過去 4 週同星期營業資料，總銷售金額最高的 2 個大類
+  - 明日預計準備商品：依過去 4 週同星期資料，相對近 8 週平常水準熱賣倍數最高的 2 個分類
 
 所需環境變數（GitHub Secrets，同週報腳本可重用）：
   BACKEND_API_BASE / BACKEND_USERNAME / BACKEND_PASSWORD
@@ -130,8 +130,11 @@ def format_message(d: dict) -> str:
     if recommended:
         lines.append("")
         lines.append(f"🎒 明日（{d.get('tomorrow_date', '—')}）預計準備")
-        lines.append("  " + "、".join(c.get("category", "") for c in recommended))
-        lines.append("　（依過去 4 週同星期營業資料統計）")
+        for i, c in enumerate(recommended, 1):
+            lift = c.get("lift")
+            lift_str = f"（較平常熱銷 {lift} 倍）" if lift is not None else ""
+            lines.append(f"  {i}. {c.get('category', '')} {lift_str}".rstrip())
+        lines.append("　（依過去 4 週同星期資料，相對近 8 週平常水準分析）")
 
     return "\n".join(lines)
 
