@@ -595,8 +595,8 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     - 該日 TOP 3 商品 + 個別銷售金額
     - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天），並依星期幾拆分營業點：
       週一～三＝光復、週四～日＝新埔
-    - 明日預計準備商品：取「明天」這個星期幾，過去 4 週同星期資料中，
-      相對近 8 週平常水準熱賣倍數（lift）最高的 2 個分類（優先用細分類，無則退回大類）
+    - 明日預計準備商品：取「明天」這個星期幾，過去 8 週同星期資料中，
+      相對近 16 週平常水準熱賣倍數（lift）最高的 2 個分類（優先用細分類，無則退回大類）
 
     若今日 Google Sheet 沒有對應日期的紀錄 → has_data=False，
     line_daily_report 腳本會跳過推送（避免推「資料日期：5/20」這種誤導）
@@ -658,10 +658,13 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     #
     # 作法：
     #   1. 分類粒度優先用「分類」（較細，如：保暖衣物、襪子），沒有資料才退回「大類」
-    #   2. weekday_share = 該類別在「明天星期幾」過去 4 次出現時的營收佔比
-    #      baseline_share = 該類別在近 8 週（56 天）所有營業日的營收佔比（=「平常」水準）
+    #   2. weekday_share = 該類別在「明天星期幾」過去 8 次出現時的營收佔比
+    #      baseline_share = 該類別在近 16 週（112 天，= 2 倍樣本窗）所有營業日的營收佔比（=「平常」水準）
     #      lift = weekday_share / baseline_share，倍數越高代表該類別在這個星期幾特別熱賣
     #   3. 只出現 1 天的類別視為樣本不足；baseline 佔比 < 0.5% 視為太冷門、比值容易失真，都排除
+    WEEKDAY_SAMPLE_WEEKS = 8
+    BASELINE_WEEKS = WEEKDAY_SAMPLE_WEEKS * 2
+
     tomorrow_date = target_date + pd.Timedelta(days=1)
     recommended_categories = []
 
@@ -672,11 +675,13 @@ def line_daily_brief(user: str = Depends(get_current_user)):
         cat_col = "大類"
 
     if cat_col:
-        past_same_weekday = [tomorrow_date - pd.Timedelta(days=7 * k) for k in (1, 2, 3, 4)]
+        past_same_weekday = [
+            tomorrow_date - pd.Timedelta(days=7 * k) for k in range(1, WEEKDAY_SAMPLE_WEEKS + 1)
+        ]
         past_dates = {d.date() for d in past_same_weekday}
         weekday_pool = df[df["_date"].dt.date.isin(past_dates)]
 
-        baseline_start = target_date - pd.Timedelta(days=56)
+        baseline_start = target_date - pd.Timedelta(days=7 * BASELINE_WEEKS)
         baseline_pool = df[(df["_date"] > baseline_start) & (df["_date"] <= target_date)]
 
         if not weekday_pool.empty and not baseline_pool.empty:
