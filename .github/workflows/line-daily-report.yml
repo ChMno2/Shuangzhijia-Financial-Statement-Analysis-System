@@ -1,10 +1,13 @@
-name: LINE 每日速報（下午 4 點）
+name: LINE 每日速報（下午 3 點）
 
 on:
   schedule:
-    # 目標：台灣 16:00；提早 4 小時排程吃掉 GHA cron 固定延遲
-    # UTC 03:47 = 台灣 11:47 (排程) → 實際送達約 16:00
-    # 沒銷售資料當天會在腳本內判斷後跳過推送
+    # GHA 排程本身不保證準時：實測這個 workflow 過去延遲從 38 分鐘到 2.5 小時都有，
+    # 「提早 N 分鐘」這種固定補償量無法同時應付兩種情況。
+    # 改成：提早很多觸發（給足夠 buffer 蓋過最壞延遲），實際送達時間交給
+    # 腳本內的「精確等到台灣時間 15:00」邏輯處理，不管 GHA 幾點真的開始跑，
+    # 都會等到 15:00 整才推送。
+    # UTC 03:47 = 台灣 11:47（排程觸發，留 3 小時以上 buffer）
     - cron: '47 3 * * *'
 
   workflow_dispatch:
@@ -12,7 +15,8 @@ on:
 jobs:
   push-daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 可能需要 sleep 到 15:00 才會真正開始推送，故拉長 timeout
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

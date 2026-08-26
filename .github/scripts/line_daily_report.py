@@ -1,6 +1,11 @@
 """
 雙之家 LINE 每日速報腳本（不呼叫 LLM）
-排程：每日 16:00 台灣時間 推送
+排程：每日台灣時間 15:00 推送
+
+GitHub Actions 的 schedule 觸發本身不保證準時（實測延遲從幾十分鐘到 2.5 小時都有），
+所以 workflow 故意提早很多觸發，實際送達時間由本腳本的 wait_until_target() 精確控制：
+不管 GHA 幾點真的開始跑這個 job，都會等到台灣時間 15:00 整才真正抓資料、推送。
+手動用 workflow_dispatch 觸發時會略過等待，立即執行（方便測試）。
 
 內容：
   - 當日營收、淨利、毛利率
@@ -14,8 +19,15 @@
 """
 import json
 import os
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+TARGET_HOUR = 15
+TARGET_MINUTE = 0
+TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 def _env(name: str) -> str:
@@ -45,6 +57,31 @@ def http_json(url: str, method: str = "GET", headers: dict | None = None,
             return resp.status, json.loads(resp.read().decode() or "null")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def wait_until_target() -> None:
+    """精確等到台灣時間 TARGET_HOUR:TARGET_MINUTE 才返回。
+
+    排程觸發（schedule）才等待；手動觸發（workflow_dispatch）直接跳過，方便測試。
+    若 GHA 排程延遲導致開始執行時已經超過目標時間，就不再等待，直接執行（盡快送達）。
+    """
+    if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+        print("[等待] 非排程觸發，略過等待，立即執行", flush=True)
+        return
+
+    now = datetime.now(TAIPEI)
+    target = now.replace(hour=TARGET_HOUR, minute=TARGET_MINUTE, second=0, microsecond=0)
+    if now >= target:
+        print(f"[等待] 現在已是 {now:%H:%M:%S}，晚於目標 {TARGET_HOUR:02d}:{TARGET_MINUTE:02d}，直接執行", flush=True)
+        return
+
+    wait_seconds = (target - now).total_seconds()
+    print(
+        f"[等待] 現在 {now:%H:%M:%S}，等到台灣時間 {TARGET_HOUR:02d}:{TARGET_MINUTE:02d} 才推送"
+        f"（約 {wait_seconds / 60:.0f} 分鐘）...",
+        flush=True,
+    )
+    time.sleep(wait_seconds)
 
 
 def login() -> str:
@@ -154,6 +191,8 @@ def push_line(text: str) -> None:
 
 
 def main() -> None:
+    wait_until_target()
+
     token = login()
     daily = fetch_daily(token)
 
