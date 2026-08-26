@@ -10,9 +10,6 @@ on:
     # UTC 03:47 = 台灣 11:47（排程觸發，留 3 小時以上 buffer）
     - cron: '47 3 * * *'
 
-    # TEMP-TEST：再次驗證 wait_until_target() 會等到 15:00 才推送，測完即刪
-    - cron: '12 5 * * *'
-
   workflow_dispatch:
 
 jobs:
