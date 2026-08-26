@@ -36,6 +36,56 @@ def _filter_by_range(df: pd.DataFrame, days: int = None,
         return df[(df["_date"] >= cutoff) & (df["_date"] <= latest)]
 
 
+def compute_pair_affinity(sales_df: pd.DataFrame, min_days: int = 15,
+                          top_n: int = 3, min_correlation: float = 0.4) -> list:
+    """
+    找出「同一天業績會一起波動」的商品配對，作為搭配銷售的替代指標。
+
+    注意：資料裡沒有訂單/交易編號欄位，沒辦法知道哪些商品是同一位客人、
+    同一次結帳一起買的（真正的購物籃分析）。這裡算的是「A 賣得好的那幾天，
+    B 通常也賣得好」的每日營收相關係數，反映需求連動，不等於同一筆交易。
+
+    只用有足夠銷售天數（>= min_days）的商品，避免長尾商品因樣本太少
+    讓相關係數失真；相關係數需 >= min_correlation 才視為有意義的連動。
+    """
+    if "品名" not in sales_df.columns or sales_df.empty:
+        return []
+
+    daily_item = (
+        sales_df.groupby([sales_df["_date"].dt.date, "品名"])["_sales"]
+        .sum()
+        .reset_index()
+    )
+    daily_item.columns = ["date", "item", "revenue"]
+
+    pivot = daily_item.pivot(index="date", columns="item", values="revenue").fillna(0)
+
+    valid_items = [c for c in pivot.columns if (pivot[c] > 0).sum() >= min_days]
+    if len(valid_items) < 2:
+        return []
+    pivot = pivot[valid_items]
+
+    corr = pivot.corr(method="pearson")
+    cols = corr.columns.tolist()
+
+    pairs = []
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            a, b = cols[i], cols[j]
+            r = corr.iloc[i, j]
+            if pd.notna(r) and r >= min_correlation:
+                both_days = int(((pivot[a] > 0) & (pivot[b] > 0)).sum())
+                pairs.append({
+                    "item_a": str(a),
+                    "item_b": str(b),
+                    "correlation": round(float(r), 2),
+                    "days_both_sold": both_days,
+                })
+
+    pairs.sort(key=lambda p: p["correlation"], reverse=True)
+    return pairs[:top_n]
+
+
 def build_dashboard_data(sales_df: pd.DataFrame, expense_df: pd.DataFrame = None) -> dict:
     """建立完整儀表板資料（以資料最新日期為基準）"""
     if sales_df.empty:
@@ -102,6 +152,9 @@ def build_dashboard_data(sales_df: pd.DataFrame, expense_df: pd.DataFrame = None
     # 商品種類數
     unique_products = int(last_30["品名"].nunique()) if "品名" in last_30.columns else 0
 
+    # 搭配銷售替代指標（用全部快取資料算，近 30 天樣本天數不夠算相關係數）
+    pair_affinity = compute_pair_affinity(sales_df)
+
     return {
         "summary": {
             "this_week_revenue": this_week_rev,
@@ -112,6 +165,7 @@ def build_dashboard_data(sales_df: pd.DataFrame, expense_df: pd.DataFrame = None
             "total_expense": total_expense,
             "unique_products": unique_products,
             "data_latest_date": str(ref.date()),
+            "pair_affinity": pair_affinity,
         },
         "daily_sales": daily_list,
         "category_sales": category_list,

@@ -101,16 +101,29 @@ def format_headline(summary: dict) -> str:
     growth = summary.get("week_growth", 0) or 0
     growth_emoji = "📈" if growth >= 0 else "📉"
 
-    return (
-        f"📊 雙之家本週速報\n"
-        f"資料日期：{summary.get('data_latest_date', '—')}\n"
-        f"────────────\n"
-        f"💰 本週營收：{money(summary.get('this_week_revenue', 0))}\n"
-        f"{growth_emoji} 較上週：{growth:+.1f}%\n"
-        f"📅 本月累計：{money(summary.get('this_month_revenue', 0))}\n"
-        f"🛒 近30天交易：{summary.get('total_transactions', 0):,} 筆\n"
-        f"🏷️ 商品種類：{summary.get('unique_products', 0)} 種"
-    )
+    lines = [
+        "📊 雙之家本週速報",
+        f"資料日期：{summary.get('data_latest_date', '—')}",
+        "────────────",
+        f"💰 本週營收：{money(summary.get('this_week_revenue', 0))}",
+        f"{growth_emoji} 較上週：{growth:+.1f}%",
+        f"📅 本月累計：{money(summary.get('this_month_revenue', 0))}",
+        f"🛒 近30天交易：{summary.get('total_transactions', 0):,} 筆",
+        f"🏷️ 商品種類：{summary.get('unique_products', 0)} 種",
+    ]
+
+    pairs = summary.get("pair_affinity") or []
+    if pairs:
+        lines.append("")
+        lines.append("🔗 銷售連動組合")
+        for p in pairs:
+            lines.append(
+                f"  {p.get('item_a', '')} × {p.get('item_b', '')}"
+                f"（連動度 {p.get('correlation', 0)}，{p.get('days_both_sold', 0)} 天同時有賣）"
+            )
+        lines.append("　（同一天業績會一起波動，不代表同一位客人一起買）")
+
+    return "\n".join(lines)
 
 
 def push_line(messages: list[str]) -> None:
