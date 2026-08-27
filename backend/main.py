@@ -594,7 +594,7 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     - 「今日」（呼叫當下的日期）的營收、淨利、毛利率
     - 該日 TOP 3 商品 + 個別銷售金額
     - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天），並依星期幾拆分營業點：
-      週一～三＝光復、週四～日＝新埔
+      週一～三＝新埔、週四～日＝光復
     - 明日預計準備商品：取「明天」這個星期幾，過去 8 週同星期資料中，
       相對近 16 週平常水準熱賣倍數（lift）最高的 2 個分類（優先用細分類，無則退回大類）
 
@@ -640,14 +640,14 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     mtd_revenue = round(float(mtd["_sales"].sum()), 0) if not mtd.empty else 0.0
     mtd_transactions = int(len(mtd))
 
-    # 本月累計依營業點拆分：週一～三＝光復，週四～日＝新埔
+    # 本月累計依營業點拆分：週一～三＝新埔，週四～日＝光復
     # （依星期幾固定排班，不依賴 Google Sheet 上的「營業點」欄位是否有填）
     guangfu_revenue = xinpu_revenue = 0.0
     guangfu_transactions = xinpu_transactions = 0
     if not mtd.empty:
         mtd_weekday = mtd["_date"].dt.dayofweek
-        guangfu_mask = mtd_weekday.isin([0, 1, 2])  # 一二三
-        xinpu_mask = mtd_weekday.isin([3, 4, 5, 6])  # 四五六日
+        xinpu_mask = mtd_weekday.isin([0, 1, 2])  # 一二三
+        guangfu_mask = mtd_weekday.isin([3, 4, 5, 6])  # 四五六日
         guangfu_revenue = round(float(mtd.loc[guangfu_mask, "_sales"].sum()), 0)
         guangfu_transactions = int(guangfu_mask.sum())
         xinpu_revenue = round(float(mtd.loc[xinpu_mask, "_sales"].sum()), 0)
