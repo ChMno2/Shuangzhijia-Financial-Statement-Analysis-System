@@ -1,48 +1,85 @@
 """
-Google Drive 資料存取模組 — 支援 Excel (.xlsx) 格式
+Google Sheets 資料存取模組
+
+改用 Sheets API 直接讀取即時儲存格數值，不再透過 Drive API 下載匯出的
+.xlsx 快照。原因：「總表」的營業點欄位是 Apps Script 自訂函數算出來的
+（=IFERROR(@__xludf.DUMMYFUNCTION(...), ...)），Google 把這種檔案匯出成
+.xlsx 時要先重新計算並凍結所有自訂函數結果，這個匯出快照對這份檔案來說
+會嚴重落後（實測落後超過一整個工作天），導致抓不到當天最新資料。
+Sheets API 讀的是試算表當下即時算好的結果，沒有這個匯出延遲問題。
 """
 import os
-import io
 import re
 from datetime import datetime
 import pandas as pd
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
 from dotenv import load_dotenv
 
 load_dotenv()
 
 SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
 
-def get_drive_service():
+def _load_credentials():
     # 優先從環境變數讀取（雲端部署用），否則從檔案讀取（本地開發用）
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
         import json
         info = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-    else:
-        creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-        creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
-    return build("drive", "v3", credentials=creds)
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
+    creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+    return Credentials.from_service_account_file(creds_file, scopes=SCOPES)
 
 
-def download_excel() -> pd.ExcelFile:
-    """從 Google Drive 下載 Excel 檔案並回傳 ExcelFile 物件"""
-    service = get_drive_service()
-    file_id = os.getenv("SPREADSHEET_ID")
-    request = service.files().get_media(fileId=file_id)
-    buf = io.BytesIO()
-    downloader = MediaIoBaseDownload(buf, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    buf.seek(0)
-    return pd.ExcelFile(buf)
+def get_sheets_service():
+    return build("sheets", "v4", credentials=_load_credentials())
+
+
+def _quote_sheet_name(name: str) -> str:
+    """A1 表示法裡工作表名稱含空白／特殊符號時需要用單引號包起來"""
+    return "'" + name.replace("'", "''") + "'"
+
+
+class _SheetsAdapter:
+    """模仿 pd.ExcelFile 的介面（.sheet_names / .parse()），
+    讓 get_recent_sheet_names() / load_all_sales() / load_all_expenses()
+    不用跟著改，底層改成用 Sheets API 讀即時資料。"""
+
+    def __init__(self, service, spreadsheet_id: str):
+        self._service = service
+        self._spreadsheet_id = spreadsheet_id
+        meta = service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id, fields="sheets.properties.title"
+        ).execute()
+        self.sheet_names = [
+            s["properties"]["title"] for s in meta.get("sheets", [])
+        ]
+
+    def parse(self, sheet_name: str) -> pd.DataFrame:
+        resp = self._service.spreadsheets().values().get(
+            spreadsheetId=self._spreadsheet_id,
+            range=_quote_sheet_name(sheet_name),
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+        rows = resp.get("values", [])
+        if not rows:
+            return pd.DataFrame()
+        header, *body = rows
+        width = len(header)
+        # Sheets API 會省略每列尾端的空白儲存格，把每列補／截到跟表頭一樣長，避免欄位對不齊
+        body = [(r + [None] * (width - len(r)))[:width] for r in body]
+        return pd.DataFrame(body, columns=header)
+
+
+def download_excel() -> "_SheetsAdapter":
+    """透過 Sheets API 讀取試算表，回傳模仿 pd.ExcelFile 介面的介接物件"""
+    service = get_sheets_service()
+    spreadsheet_id = os.getenv("SPREADSHEET_ID")
+    return _SheetsAdapter(service, spreadsheet_id)
 
 
 def parse_sheet_period(name: str):
@@ -70,7 +107,7 @@ def _normalize_sheet_name(name: str) -> str:
     return name.strip().strip("[]【】「」「」").strip()
 
 
-def get_recent_sheet_names(xl: pd.ExcelFile, months: int = 12) -> list:
+def get_recent_sheet_names(xl: "_SheetsAdapter", months: int = 12) -> list:
     """
     取得要讀的工作表名稱清單。
     優先順序：
@@ -136,7 +173,7 @@ def _parse_date_with_year(series: pd.Series, fallback_year: int) -> pd.Series:
     return series.apply(_parse_one)
 
 
-def load_all_sales(xl: pd.ExcelFile, sheet_names: list) -> pd.DataFrame:
+def load_all_sales(xl: "_SheetsAdapter", sheet_names: list) -> pd.DataFrame:
     """
     讀取多個工作表的銷售資料並合併
     銷售列判斷：日期欄不為 NaN 且 銷售總金額 不為 NaN
@@ -252,7 +289,7 @@ def load_all_sales(xl: pd.ExcelFile, sheet_names: list) -> pd.DataFrame:
     return merged
 
 
-def load_all_expenses(xl: pd.ExcelFile, sheet_names: list) -> pd.DataFrame:
+def load_all_expenses(xl: "_SheetsAdapter", sheet_names: list) -> pd.DataFrame:
     """讀取多個工作表的支出資料"""
     frames = []
     for name in sheet_names:
