@@ -2,15 +2,19 @@ name: LINE 每日速報（下午 3 點）
 
 on:
   schedule:
-    # GHA 排程本身不保證準時：實測這個 workflow 過去延遲從 38 分鐘到 2.5 小時都有，
-    # 「提早 N 分鐘」這種固定補償量無法同時應付兩種情況。
-    # 改成：提早很多觸發（給足夠 buffer 蓋過最壞延遲），實際送達時間交給
-    # 腳本內的「精確等到台灣時間 15:00」邏輯處理，不管 GHA 幾點真的開始跑，
-    # 都會等到 15:00 整才推送。
-    # UTC 03:47 = 台灣 11:47（排程觸發，留 3 小時以上 buffer）
+    # GitHub 自己的 schedule 觸發不可靠（實測延遲從 38 分鐘到近 11 小時都有，
+    # 甚至整天直接跳過不觸發），所以主要觸發改成外部定時服務（見 README/設定紀錄）
+    # 準時呼叫 workflow_dispatch。這個 schedule 只當備援：萬一外部服務哪天沒打進來，
+    # 至少還有機會在當天稍晚被 GitHub 自己排到，腳本內的等待邏輯一樣會校正到 15:00。
+    # UTC 03:47 = 台灣 11:47
     - cron: '47 3 * * *'
 
   workflow_dispatch:
+    inputs:
+      test_now:
+        description: '手動測試用：略過等待、立即執行送出（外部定時服務呼叫時會帶 false，走正常等待邏輯）'
+        type: boolean
+        default: true
 
 jobs:
   push-daily:
@@ -29,4 +33,5 @@ jobs:
           BACKEND_PASSWORD: ${{ secrets.BACKEND_PASSWORD }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_TARGET_USER_ID: ${{ secrets.LINE_TARGET_USER_ID }}
+          TEST_NOW: ${{ inputs.test_now }}
         run: python .github/scripts/line_daily_report.py

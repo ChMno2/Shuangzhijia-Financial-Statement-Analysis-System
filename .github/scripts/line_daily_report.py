@@ -2,10 +2,11 @@
 雙之家 LINE 每日速報腳本（不呼叫 LLM）
 排程：每日台灣時間 15:00 推送
 
-GitHub Actions 的 schedule 觸發本身不保證準時（實測延遲從幾十分鐘到 2.5 小時都有），
-所以 workflow 故意提早很多觸發，實際送達時間由本腳本的 wait_until_target() 精確控制：
-不管 GHA 幾點真的開始跑這個 job，都會等到台灣時間 15:00 整才真正抓資料、推送。
-手動用 workflow_dispatch 觸發時會略過等待，立即執行（方便測試）。
+GitHub Actions 的 schedule 觸發本身不保證準時（實測延遲從幾十分鐘到近 11 小時都有，
+甚至整天直接跳過不觸發），所以主要觸發改用外部定時服務在台灣時間 15:00 準時呼叫
+workflow_dispatch；GitHub 自己的 schedule 只當備援。不管實際是被誰、幾點觸發，
+本腳本的 wait_until_target() 都會校正到台灣時間 15:00 整才真正抓資料、推送
+（手動點 Run workflow 測試時，test_now 預設 true 會略過等待，立即執行）。
 
 內容：
   - 當日營收、淨利、毛利率
@@ -62,11 +63,16 @@ def http_json(url: str, method: str = "GET", headers: dict | None = None,
 def wait_until_target() -> None:
     """精確等到台灣時間 TARGET_HOUR:TARGET_MINUTE 才返回。
 
-    排程觸發（schedule）才等待；手動觸發（workflow_dispatch）直接跳過，方便測試。
-    若 GHA 排程延遲導致開始執行時已經超過目標時間，就不再等待，直接執行（盡快送達）。
+    - schedule 觸發（GitHub 自己的排程，當備援用）→ 一律等待
+    - workflow_dispatch 且 TEST_NOW=true（手動點 Run workflow 的預設值）→ 略過等待，方便測試
+    - workflow_dispatch 且 TEST_NOW=false（外部定時服務準時呼叫）→ 一樣等待，
+      多一層保險：就算外部服務哪天提早呼叫，也不會提早送出不完整的當日資料
+    若開始執行時已經超過目標時間，就不再等待，直接執行（盡快送達）。
     """
-    if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
-        print("[等待] 非排程觸發，略過等待，立即執行", flush=True)
+    event = os.environ.get("GITHUB_EVENT_NAME")
+    test_now = os.environ.get("TEST_NOW", "true").lower() == "true"
+    if event == "workflow_dispatch" and test_now:
+        print("[等待] 手動測試觸發（test_now=true），略過等待，立即執行", flush=True)
         return
 
     now = datetime.now(TAIPEI)
@@ -171,6 +177,9 @@ def format_message(d: dict) -> str:
             lift = c.get("lift")
             lift_str = f"（較平常熱銷 {lift} 倍）" if lift is not None else ""
             lines.append(f"  {i}. {c.get('category', '')} {lift_str}".rstrip())
+            top_items = c.get("top_items") or []
+            if top_items:
+                lines.append(f"　　熱門品項：{'、'.join(top_items)}")
         lines.append("　（依過去 8 週同星期資料分析）")
 
     return "\n".join(lines)
