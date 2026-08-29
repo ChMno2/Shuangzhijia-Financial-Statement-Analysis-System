@@ -567,9 +567,9 @@ def _process_line_event(event: dict) -> None:
     provider = os.getenv("LLM_PROVIDER", "claude").lower()
     try:
         if provider == "gemini":
-            answer = analyze_with_agent_gemini(question, [])
+            answer = analyze_with_agent_gemini(question, [], concise=True)
         else:
-            answer = analyze_with_agent(question, [])
+            answer = analyze_with_agent(question, [], concise=True)
         answer = _strip_markdown(answer)
         if not answer:
             answer = "（沒有回應，請換個方式問問看）"
