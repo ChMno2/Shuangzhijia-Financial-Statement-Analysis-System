@@ -40,27 +40,18 @@ AGENT_SYSTEM_PROMPT = """你是雙之家的商業智慧分析師。雙之家販�
 - 引用網路搜尋結果時，說明資訊來源的標題
 - 資料有限時，用現有資料盡量回答，末尾一句說明限制"""
 
-CONCISE_INSTRUCTION = """
 
-簡潔模式（這次是在 LINE 聊天室裡回覆，用手機讀）：
-- 只給結論和關鍵字，不要展開列點說明、不要附來源網址或引用段落、不要用表格
-- 總長度控制在 5 行以內
-- 如果對方想要更完整的分析，結尾一句提示可以再追問細節"""
-
-
-def analyze_with_agent(question: str, chat_history: list = None, concise: bool = False) -> str:
+def analyze_with_agent(question: str, chat_history: list = None) -> str:
     """
     使用 Claude tool_use Agent 動態查詢資料庫與外部資訊回答問題。
     - 內部工具：query_sales、compare_periods、get_trend、get_summary（SQLite）
     - 外部工具：get_weather_forecast、web_search、search_japan_trends
-    - concise=True：LINE 聊天室用的精簡回答模式（只給結論和關鍵字）
     """
     from sales_db import TOOL_DEFINITIONS, TOOL_FUNCTIONS
     from external_tools import EXTERNAL_TOOL_DEFINITIONS, EXTERNAL_TOOL_FUNCTIONS
 
     all_tools = TOOL_DEFINITIONS + EXTERNAL_TOOL_DEFINITIONS
     all_functions = {**TOOL_FUNCTIONS, **EXTERNAL_TOOL_FUNCTIONS}
-    system_prompt = AGENT_SYSTEM_PROMPT + (CONCISE_INSTRUCTION if concise else "")
 
     messages = []
     if chat_history:
@@ -73,7 +64,7 @@ def analyze_with_agent(question: str, chat_history: list = None, concise: bool =
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=2500,
-            system=system_prompt,
+            system=AGENT_SYSTEM_PROMPT,
             tools=all_tools,
             messages=messages,
         )
@@ -136,12 +127,11 @@ def _gemini_post(payload: dict, timeout: int = 60) -> dict:
         return json.loads(resp.read().decode())
 
 
-def analyze_with_agent_gemini(question: str, chat_history: list = None, concise: bool = False) -> str:
+def analyze_with_agent_gemini(question: str, chat_history: list = None) -> str:
     """
     使用 Gemini function calling 的 Agent 版本（免費）
     - 同樣可用 query_sales / get_summary / get_weather_forecast / web_search 等工具
     - 適用於 LINE 雙向對話以節省 token 成本
-    - concise=True：LINE 聊天室用的精簡回答模式（只給結論和關鍵字）
     """
     if not GEMINI_API_KEY:
         return "（GEMINI_API_KEY 未設定，請在 Render 環境變數加上）"
@@ -164,10 +154,9 @@ def analyze_with_agent_gemini(question: str, chat_history: list = None, concise:
             contents.append({"role": role, "parts": [{"text": content}]})
     contents.append({"role": "user", "parts": [{"text": question}]})
 
-    system_prompt = AGENT_SYSTEM_PROMPT + (CONCISE_INSTRUCTION if concise else "")
     base_payload = {
         "tools": gemini_tools,
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "systemInstruction": {"parts": [{"text": AGENT_SYSTEM_PROMPT}]},
         "generationConfig": {"maxOutputTokens": 2500, "temperature": 0.3},
     }
 
