@@ -141,7 +141,20 @@ def get_recent_sheet_names(xl: "_SheetsAdapter", months: int = 12) -> list:
             result.append((y, m, name))
 
     result.sort()
-    return [r[2] for r in result]
+    if result:
+        return [r[2] for r in result]
+
+    # 3. 都沒配對到，且整個檔案只有一個分頁（例如 Google 表單回覆試算表，
+    #    表單回覆一直往下累積、不分月份分頁）→ 直接用它
+    if len(xl.sheet_names) == 1:
+        print(
+            f"[get_recent_sheet_names] 無 master sheet／日期分頁可比對，"
+            f"檔案只有一個分頁，直接使用：'{xl.sheet_names[0]}'",
+            flush=True,
+        )
+        return list(xl.sheet_names)
+
+    return []
 
 
 def _parse_date_with_year(series: pd.Series, fallback_year: int) -> pd.Series:
@@ -173,10 +186,180 @@ def _parse_date_with_year(series: pd.Series, fallback_year: int) -> pd.Series:
     return series.apply(_parse_one)
 
 
+def _find_type_col(df: pd.DataFrame):
+    """Google 表單回覆專用：找「支出 or 收入」這個標記欄（同時含這兩個字才算數，
+    避免誤配到其他欄位）"""
+    return next(
+        (c for c in df.columns if "收入" in str(c) and "支出" in str(c)), None
+    )
+
+
+def _parse_form_responses_sales(df: pd.DataFrame, type_col, fallback_year: int):
+    """
+    解析 Google 表單回覆裡的「收入」列。
+
+    這種表單沒有現成的「銷售總金額」欄，要用「單價 × 數量」自己算；
+    「分類」也不是單一欄位，而是服飾/食品/醫藥/雜貨四個子問題各自一欄，
+    只有對應大類那一欄會被填寫，取有值的那一欄當分類。
+    「營業點」在這裡是表單直接勾選的答案（不是公式推算），比用星期幾猜測可靠。
+    """
+    date_col = next((c for c in df.columns if str(c).startswith("日期")), None)
+    item_col = next((c for c in df.columns if "商品名" in str(c)), None)
+    qty_col = next((c for c in df.columns if "數量" in str(c)), None)
+    price_col = next((c for c in df.columns if "單價" in str(c)), None)
+    cost_col = next(
+        (c for c in df.columns if "成本" in str(c) and "費用" not in str(c)), None
+    )
+    loc_col = next((c for c in df.columns if "營業點" in str(c)), None)
+    cat_col = next((c for c in df.columns if str(c) == "大類"), None)
+    subcat_cols = [c for c in df.columns if "請問是「" in str(c)]
+
+    if date_col is None or item_col is None or qty_col is None or price_col is None:
+        return None
+
+    income = df[df[type_col].astype(str).str.strip() == "收入"].copy()
+    if income.empty:
+        return None
+
+    income["_date"] = _parse_date_with_year(income[date_col], fallback_year)
+    qty = pd.to_numeric(income[qty_col], errors="coerce")
+    price = pd.to_numeric(income[price_col], errors="coerce")
+    income["_sales"] = price * qty
+
+    income = income[
+        income["_date"].notna() & income["_sales"].notna() & (income["_sales"] > 0)
+    ].copy()
+    if income.empty:
+        return None
+
+    if cost_col is not None:
+        unit_cost = pd.to_numeric(income[cost_col], errors="coerce")
+        qty = pd.to_numeric(income[qty_col], errors="coerce")
+        income["_cost"] = unit_cost * qty
+    else:
+        income["_cost"] = float("nan")
+
+    if subcat_cols:
+        def _first_subcat(row):
+            for c in subcat_cols:
+                v = row.get(c)
+                if v is not None and str(v).strip():
+                    return str(v).strip()
+            return None
+        income["分類"] = income.apply(_first_subcat, axis=1)
+    else:
+        income["分類"] = None
+
+    rename = {item_col: "品名"}
+    if cat_col is not None:
+        rename[cat_col] = "大類"
+    if loc_col is not None:
+        rename[loc_col] = "營業點"
+    income = income.rename(columns=rename)
+
+    keep = ["_date", "_sales", "_cost", "品名", "分類"]
+    keep += [c for c in ("大類", "營業點") if c in income.columns]
+    return income[keep].copy()
+
+
+def _parse_legacy_sheet_sales(df: pd.DataFrame, fallback_year: int):
+    """解析舊格式工作表（日期分頁 / 總表 IMPORTRANGE 匯總）的銷售資料"""
+    # 找「日期」欄
+    date_col = None
+    for col in df.columns:
+        if isinstance(col, datetime):
+            date_col = col
+            break
+        if str(col).startswith("日期"):
+            date_col = col
+            break
+    if date_col is None and len(df.columns) > 0:
+        date_col = df.columns[0]
+
+    # 找銷售總金額欄
+    sales_col = None
+    for col in df.columns:
+        if "銷售總金額" in str(col):
+            sales_col = col
+            break
+
+    if date_col is None or sales_col is None:
+        return None
+
+    df = df.copy()
+    df["_date"] = _parse_date_with_year(df[date_col], fallback_year)
+    df["_sales"] = pd.to_numeric(df[sales_col], errors="coerce")
+    sales_df = df[df["_date"].notna() & df["_sales"].notna() & (df["_sales"] > 0)].copy()
+
+    if sales_df.empty:
+        return None
+
+    # 標準化欄位名稱
+    col_rename = {}
+    for col in df.columns:
+        cs = str(col)
+        if "大類" in cs:
+            col_rename[col] = "大類"
+        elif "分類" in cs and "大類" not in cs:
+            col_rename[col] = "分類"
+        elif "品名" in cs:
+            col_rename[col] = "品名"
+        elif cs in ["單價", "銷售單價"]:
+            col_rename[col] = "單價"
+        elif "銷售數量" in cs:
+            col_rename[col] = "銷售數量"
+        elif "營業點" in cs:
+            col_rename[col] = "營業點"
+        elif "進貨總成本" in cs:
+            col_rename[col] = "進貨總成本"
+        elif "進貨單價（台幣）" in cs:
+            col_rename[col] = "進貨單價（台幣）"
+        elif "銷售成本" in cs:
+            col_rename[col] = "銷售成本"
+        elif "銷售淨利" in cs:
+            col_rename[col] = "銷售淨利"
+
+    sales_df = sales_df.rename(columns=col_rename)
+
+    # 建立統一成本欄 _cost（優先順序：銷售成本 > 進貨總成本 > 進貨單價×數量）
+    # 都無資料則為 NaN（標記為表單未填寫）
+    cost_series = pd.Series([float("nan")] * len(sales_df), index=sales_df.index)
+
+    # 1. 銷售成本（最新工作表格式）— 銷售成本為單位成本，需乘以銷售數量
+    if "銷售成本" in sales_df.columns:
+        v = pd.to_numeric(sales_df["銷售成本"], errors="coerce")
+        if "銷售數量" in sales_df.columns:
+            qty = pd.to_numeric(sales_df["銷售數量"], errors="coerce")
+            calc = v * qty
+        else:
+            calc = v
+        mask = calc.notna() & (calc > 0)
+        cost_series[mask] = calc[mask]
+
+    # 2. 進貨總成本（舊格式直接記錄總成本）
+    if "進貨總成本" in sales_df.columns:
+        v = pd.to_numeric(sales_df["進貨總成本"], errors="coerce")
+        mask = v.notna() & (v > 0) & cost_series.isna()
+        cost_series[mask] = v[mask]
+
+    # 3. 進貨單價（台幣）× 銷售數量（舊格式用單價記錄）
+    if "進貨單價（台幣）" in sales_df.columns and "銷售數量" in sales_df.columns:
+        unit = pd.to_numeric(sales_df["進貨單價（台幣）"], errors="coerce")
+        qty = pd.to_numeric(sales_df["銷售數量"], errors="coerce")
+        calc = unit * qty
+        mask = calc.notna() & (calc > 0) & cost_series.isna()
+        cost_series[mask] = calc[mask]
+
+    sales_df["_cost"] = cost_series
+    return sales_df
+
+
 def load_all_sales(xl: "_SheetsAdapter", sheet_names: list) -> pd.DataFrame:
     """
-    讀取多個工作表的銷售資料並合併
-    銷售列判斷：日期欄不為 NaN 且 銷售總金額 不為 NaN
+    讀取多個工作表的銷售資料並合併。
+
+    Google 表單回覆試算表（有「支出 or 收入」欄）走 _parse_form_responses_sales；
+    舊格式（日期分頁 / 總表 IMPORTRANGE 匯總）走 _parse_legacy_sheet_sales。
     """
     frames = []
     for name in sheet_names:
@@ -185,97 +368,18 @@ def load_all_sales(xl: "_SheetsAdapter", sheet_names: list) -> pd.DataFrame:
         except Exception:
             continue
 
-        # 從工作表名稱推算年份（供日期補全用）
         parsed_period = parse_sheet_period(name)
         fallback_year = parsed_period[0] if parsed_period else datetime.today().year
 
-        # 找「日期」欄
-        date_col = None
-        for col in df.columns:
-            if isinstance(col, datetime):
-                date_col = col
-                break
-            if str(col).startswith("日期"):
-                date_col = col
-                break
-        if date_col is None and len(df.columns) > 0:
-            date_col = df.columns[0]
+        type_col = _find_type_col(df)
+        if type_col is not None:
+            sales_df = _parse_form_responses_sales(df, type_col, fallback_year)
+        else:
+            sales_df = _parse_legacy_sheet_sales(df, fallback_year)
 
-        # 找銷售總金額欄
-        sales_col = None
-        for col in df.columns:
-            if "銷售總金額" in str(col):
-                sales_col = col
-                break
-
-        if date_col is None or sales_col is None:
+        if sales_df is None or sales_df.empty:
             continue
 
-        df = df.copy()
-        df["_date"] = _parse_date_with_year(df[date_col], fallback_year)
-        df["_sales"] = pd.to_numeric(df[sales_col], errors="coerce")
-        sales_df = df[df["_date"].notna() & df["_sales"].notna() & (df["_sales"] > 0)].copy()
-
-        if sales_df.empty:
-            continue
-
-        # 標準化欄位名稱
-        col_rename = {}
-        for col in df.columns:
-            cs = str(col)
-            if "大類" in cs:
-                col_rename[col] = "大類"
-            elif "分類" in cs and "大類" not in cs:
-                col_rename[col] = "分類"
-            elif "品名" in cs:
-                col_rename[col] = "品名"
-            elif cs in ["單價", "銷售單價"]:
-                col_rename[col] = "單價"
-            elif "銷售數量" in cs:
-                col_rename[col] = "銷售數量"
-            elif "營業點" in cs:
-                col_rename[col] = "營業點"
-            elif "進貨總成本" in cs:
-                col_rename[col] = "進貨總成本"
-            elif "進貨單價（台幣）" in cs:
-                col_rename[col] = "進貨單價（台幣）"
-            elif "銷售成本" in cs:
-                col_rename[col] = "銷售成本"
-            elif "銷售淨利" in cs:
-                col_rename[col] = "銷售淨利"
-
-        sales_df = sales_df.rename(columns=col_rename)
-
-        # 建立統一成本欄 _cost（優先順序：銷售成本 > 進貨總成本 > 進貨單價×數量）
-        # 都無資料則為 NaN（標記為表單未填寫）
-        cost_series = pd.Series([float("nan")] * len(sales_df), index=sales_df.index)
-
-        # 1. 銷售成本（最新工作表格式）— 銷售成本為單位成本，需乘以銷售數量
-        if "銷售成本" in sales_df.columns:
-            v = pd.to_numeric(sales_df["銷售成本"], errors="coerce")
-            if "銷售數量" in sales_df.columns:
-                qty = pd.to_numeric(sales_df["銷售數量"], errors="coerce")
-                calc = v * qty
-            else:
-                calc = v
-            mask = calc.notna() & (calc > 0)
-            cost_series[mask] = calc[mask]
-
-        # 2. 進貨總成本（舊格式直接記錄總成本）
-        if "進貨總成本" in sales_df.columns:
-            v = pd.to_numeric(sales_df["進貨總成本"], errors="coerce")
-            mask = v.notna() & (v > 0) & cost_series.isna()
-            cost_series[mask] = v[mask]
-
-        # 3. 進貨單價（台幣）× 銷售數量（舊格式用單價記錄）
-        if "進貨單價（台幣）" in sales_df.columns and "銷售數量" in sales_df.columns:
-            unit = pd.to_numeric(sales_df["進貨單價（台幣）"], errors="coerce")
-            qty = pd.to_numeric(sales_df["銷售數量"], errors="coerce")
-            calc = unit * qty
-            mask = calc.notna() & (calc > 0) & cost_series.isna()
-            cost_series[mask] = calc[mask]
-
-        sales_df["_cost"] = cost_series
         sales_df["sheet"] = name
         frames.append(sales_df)
 
@@ -289,6 +393,66 @@ def load_all_sales(xl: "_SheetsAdapter", sheet_names: list) -> pd.DataFrame:
     return merged
 
 
+def _parse_form_responses_expenses(df: pd.DataFrame, type_col):
+    """解析 Google 表單回覆裡的「支出」列（成本費用列表 / 實際花費兩欄）"""
+    expense_col = next((c for c in df.columns if "成本費用列表" in str(c)), None)
+    amount_col = next((c for c in df.columns if "實際花費" in str(c)), None)
+    if expense_col is None or amount_col is None:
+        return None
+
+    expense_df = df[df[type_col].astype(str).str.strip() == "支出"].copy()
+    if expense_df.empty:
+        return None
+
+    expense_df["_amount"] = pd.to_numeric(expense_df[amount_col], errors="coerce")
+    expense_df = expense_df[
+        expense_df[expense_col].notna()
+        & expense_df["_amount"].notna()
+        & (expense_df["_amount"] > 0)
+    ]
+    if expense_df.empty:
+        return None
+
+    expense_df = expense_df.rename(columns={expense_col: "支出項目"})
+    expense_df["金額"] = expense_df["_amount"]
+    return expense_df[["支出項目", "金額", "_amount"]].copy()
+
+
+def _parse_legacy_sheet_expenses(df: pd.DataFrame):
+    """解析舊格式工作表的支出資料"""
+    expense_col = None
+    for col in df.columns:
+        if "支出項目" in str(col):
+            expense_col = col
+            break
+    if expense_col is None:
+        return None
+
+    # 找金額欄（優先台幣）
+    amount_col = None
+    for col in df.columns:
+        cs = str(col)
+        if "金額（NT)" in cs or "金額（台幣)" in cs or cs == "金額":
+            amount_col = col
+            break
+    if amount_col is None:
+        for col in df.columns:
+            if "金額" in str(col) and "日幣" not in str(col) and "¥" not in str(col):
+                amount_col = col
+                break
+
+    if amount_col is None:
+        return None
+
+    expense_df = df[df[expense_col].notna()].copy()
+    expense_df["_amount"] = pd.to_numeric(expense_df[amount_col], errors="coerce")
+    expense_df = expense_df[expense_df["_amount"].notna() & (expense_df["_amount"] > 0)]
+    if expense_df.empty:
+        return None
+    expense_df = expense_df.rename(columns={expense_col: "支出項目", amount_col: "金額"})
+    return expense_df[["支出項目", "金額", "_amount"]].copy()
+
+
 def load_all_expenses(xl: "_SheetsAdapter", sheet_names: list) -> pd.DataFrame:
     """讀取多個工作表的支出資料"""
     frames = []
@@ -298,36 +462,16 @@ def load_all_expenses(xl: "_SheetsAdapter", sheet_names: list) -> pd.DataFrame:
         except Exception:
             continue
 
-        expense_col = None
-        for col in df.columns:
-            if "支出項目" in str(col):
-                expense_col = col
-                break
-        if expense_col is None:
+        type_col = _find_type_col(df)
+        if type_col is not None:
+            expense_df = _parse_form_responses_expenses(df, type_col)
+        else:
+            expense_df = _parse_legacy_sheet_expenses(df)
+
+        if expense_df is None or expense_df.empty:
             continue
-
-        # 找金額欄（優先台幣）
-        amount_col = None
-        for col in df.columns:
-            cs = str(col)
-            if "金額（NT)" in cs or "金額（台幣)" in cs or cs == "金額":
-                amount_col = col
-                break
-        if amount_col is None:
-            for col in df.columns:
-                if "金額" in str(col) and "日幣" not in str(col) and "¥" not in str(col):
-                    amount_col = col
-                    break
-
-        if amount_col is None:
-            continue
-
-        expense_df = df[df[expense_col].notna()].copy()
-        expense_df["_amount"] = pd.to_numeric(expense_df[amount_col], errors="coerce")
-        expense_df = expense_df[expense_df["_amount"].notna() & (expense_df["_amount"] > 0)]
-        expense_df = expense_df.rename(columns={expense_col: "支出項目", amount_col: "金額"})
         expense_df["sheet"] = name
-        frames.append(expense_df[["支出項目", "金額", "_amount", "sheet"]])
+        frames.append(expense_df)
 
     if not frames:
         return pd.DataFrame()

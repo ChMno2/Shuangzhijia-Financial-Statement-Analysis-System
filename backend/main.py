@@ -593,10 +593,11 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     LINE 每日速報專用 endpoint — 一次拿完所有必要資料：
     - 「今日」（呼叫當下的日期）的營收、淨利、毛利率
     - 該日 TOP 3 商品 + 個別銷售金額
-    - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天），並依星期幾拆分營業點：
-      週一～三＝新埔、週四～日＝光復
+    - 本月累計營收 / 交易筆數（當月 1 號 ~ 今天），並拆分光復／新埔累計
+      （優先用「營業點」欄位實際填答，缺資料才退回星期幾規則估計）
     - 明日預計準備商品：取「明天」這個星期幾，過去 8 週同星期資料中，
-      相對近 16 週平常水準熱賣倍數（lift）最高的 2 個分類（優先用細分類，無則退回大類）
+      相對近 16 週平常水準熱賣倍數（lift）最高的 2 個分類（優先用細分類，無則退回大類），
+      並附上每個分類底下具體賣最好的 1-2 個品項
 
     若今日 Google Sheet 沒有對應日期的紀錄 → has_data=False，
     line_daily_report 腳本會跳過推送（避免推「資料日期：5/20」這種誤導）
@@ -640,14 +641,18 @@ def line_daily_brief(user: str = Depends(get_current_user)):
     mtd_revenue = round(float(mtd["_sales"].sum()), 0) if not mtd.empty else 0.0
     mtd_transactions = int(len(mtd))
 
-    # 本月累計依營業點拆分：週一～三＝新埔，週四～日＝光復
-    # （依星期幾固定排班，不依賴 Google Sheet 上的「營業點」欄位是否有填）
+    # 本月累計依營業點拆分。優先用「營業點」欄位的實際填答（表單直接勾選，最準確）；
+    # 該欄位缺資料時才退回星期幾規則（週一～三＝新埔，週四～日＝光復）當估計值。
     guangfu_revenue = xinpu_revenue = 0.0
     guangfu_transactions = xinpu_transactions = 0
     if not mtd.empty:
-        mtd_weekday = mtd["_date"].dt.dayofweek
-        xinpu_mask = mtd_weekday.isin([0, 1, 2])  # 一二三
-        guangfu_mask = mtd_weekday.isin([3, 4, 5, 6])  # 四五六日
+        if "營業點" in mtd.columns and mtd["營業點"].notna().any():
+            guangfu_mask = mtd["營業點"] == "光復"
+            xinpu_mask = mtd["營業點"] == "新埔"
+        else:
+            mtd_weekday = mtd["_date"].dt.dayofweek
+            xinpu_mask = mtd_weekday.isin([0, 1, 2])  # 一二三
+            guangfu_mask = mtd_weekday.isin([3, 4, 5, 6])  # 四五六日
         guangfu_revenue = round(float(mtd.loc[guangfu_mask, "_sales"].sum()), 0)
         guangfu_transactions = int(guangfu_mask.sum())
         xinpu_revenue = round(float(mtd.loc[xinpu_mask, "_sales"].sum()), 0)
@@ -709,6 +714,15 @@ def line_daily_brief(user: str = Depends(get_current_user)):
 
             candidates.sort(key=lambda c: c["lift"], reverse=True)
             recommended_categories = candidates[:2]
+
+            # 每個推薦分類底下，具體要多備哪些品項：
+            # 直接看「這個分類 × 明天星期幾」這個縮小範圍內賣最好的 1-2 個品名（原始金額排名即可，
+            # 不再疊一層 lift 比值——品項粒度樣本本來就更小，雙重比值只會放大雜訊）
+            if "品名" in weekday_pool.columns:
+                for c in recommended_categories:
+                    cat_pool = weekday_pool[weekday_pool[cat_col] == c["category"]]
+                    top_items = cat_pool.groupby("品名")["_sales"].sum().nlargest(2)
+                    c["top_items"] = [str(name) for name in top_items.index]
 
     return {
         "date": str(target_date.date()),
