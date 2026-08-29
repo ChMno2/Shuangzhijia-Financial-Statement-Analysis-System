@@ -530,6 +530,14 @@ def _process_line_event(event: dict) -> None:
     if msg.get("type") != "text":
         return
 
+    # 除錯用：確認每則訊息的 source.type / 是否偵測到 @ 到機器人
+    print(
+        f"[LINE事件] source.type={src.get('type')!r}, "
+        f"mentioned={_bot_is_mentioned(msg)}, mention_raw={msg.get('mention')!r}, "
+        f"text={msg.get('text')!r}",
+        flush=True,
+    )
+
     # 群組／多人聊天室裡，沒有 @ 到機器人就不回應，避免每則訊息都搶著回答；
     # 一對一私訊沒有「@提及」這個概念，一律照常回應
     if src.get("type") in ("group", "room") and not _bot_is_mentioned(msg):
