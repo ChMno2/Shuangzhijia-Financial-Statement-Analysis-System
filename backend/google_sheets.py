@@ -112,17 +112,26 @@ def get_recent_sheet_names(xl: "_SheetsAdapter", months: int = 12) -> list:
     取得要讀的工作表名稱清單。
     優先順序：
       1) 若有「總表」之類的 master sheet → 只讀它（避免和日期分頁的舊資料重複）
-      2) 否則 → 讀最近 N 個月的日期分頁（YYYYMMDD / YYMMDD 命名）
+      2) 若有「表單回覆／表單回應」分頁（Google 表單自動建立的回覆分頁）→ 只讀它，
+         忽略檔案裡其他空白／備用分頁（例如預設建立、沒在用的「工作表1」）
+      3) 否則 → 讀最近 N 個月的日期分頁（YYYYMMDD / YYMMDD 命名）
     對 master sheet 名稱會做容錯比對（前後空白、方括號等不影響匹配）。
     """
-    # 1. 優先用 master sheet（容忍空白 / 方括號）
     print(f"[get_recent_sheet_names] 所有 sheet: {xl.sheet_names}", flush=True)
+
+    # 1. 優先用 master sheet（容忍空白 / 方括號）
     for sheet in xl.sheet_names:
         if _normalize_sheet_name(sheet) in MASTER_SHEET_NAMES:
             print(f"[get_recent_sheet_names] 命中 master sheet：'{sheet}'", flush=True)
             return [sheet]  # 回傳原始名稱（含原本的空白／符號）給 xl.parse
 
-    # 2. fallback：原本的日期分頁邏輯
+    # 2. 表單回覆分頁（Google 表單依語系可能叫「表單回覆」或「表單回應」）
+    form_sheets = [s for s in xl.sheet_names if "表單回覆" in s or "表單回應" in s]
+    if form_sheets:
+        print(f"[get_recent_sheet_names] 命中表單回覆分頁：{form_sheets}", flush=True)
+        return form_sheets
+
+    # 3. fallback：原本的日期分頁邏輯
     today = datetime.today()
     cutoff_year = today.year
     cutoff_month = today.month - months
@@ -144,8 +153,7 @@ def get_recent_sheet_names(xl: "_SheetsAdapter", months: int = 12) -> list:
     if result:
         return [r[2] for r in result]
 
-    # 3. 都沒配對到，且整個檔案只有一個分頁（例如 Google 表單回覆試算表，
-    #    表單回覆一直往下累積、不分月份分頁）→ 直接用它
+    # 4. 都沒配對到，且整個檔案只有一個分頁 → 直接用它
     if len(xl.sheet_names) == 1:
         print(
             f"[get_recent_sheet_names] 無 master sheet／日期分頁可比對，"
