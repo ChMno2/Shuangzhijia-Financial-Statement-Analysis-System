@@ -492,6 +492,25 @@ def _line_push(target_id: str, text: str) -> tuple[int, str]:
     })
 
 
+def _bot_is_mentioned(msg: dict) -> bool:
+    """LINE 群組/多人聊天室訊息若有 @ 到機器人本身，mentionees 裡該筆會帶 isSelf=true"""
+    mentionees = (msg.get("mention") or {}).get("mentionees") or []
+    return any(m.get("isSelf") for m in mentionees)
+
+
+def _strip_mentions(text: str, mention: dict) -> str:
+    """把訊息文字裡的 @提及 片段拿掉，避免「@雙之家小幫手 hi」對不到快速回覆的 "hi\""""
+    mentionees = sorted(
+        (mention or {}).get("mentionees") or [], key=lambda m: m.get("index", 0), reverse=True
+    )
+    for m in mentionees:
+        start, length = m.get("index"), m.get("length")
+        if start is None or length is None:
+            continue
+        text = text[:start] + text[start + length:]
+    return text.strip()
+
+
 def _process_line_event(event: dict) -> None:
     """處理單一 LINE webhook 事件 — 同步函式，由 BackgroundTasks 在 threadpool 執行"""
     global _last_line_source
@@ -511,8 +530,13 @@ def _process_line_event(event: dict) -> None:
     if msg.get("type") != "text":
         return
 
+    # 群組／多人聊天室裡，沒有 @ 到機器人就不回應，避免每則訊息都搶著回答；
+    # 一對一私訊沒有「@提及」這個概念，一律照常回應
+    if src.get("type") in ("group", "room") and not _bot_is_mentioned(msg):
+        return
+
     reply_token = event.get("replyToken", "")
-    question = (msg.get("text") or "").strip()
+    question = _strip_mentions(msg.get("text") or "", msg.get("mention") or {})
     if not question or not reply_token:
         return
 
