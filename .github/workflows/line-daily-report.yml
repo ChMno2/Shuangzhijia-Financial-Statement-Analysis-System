@@ -1,14 +1,9 @@
 name: LINE 每日速報（下午 3 點）
 
 on:
-  schedule:
-    # GitHub 自己的 schedule 觸發不可靠（實測延遲從 38 分鐘到近 11 小時都有，
-    # 甚至整天直接跳過不觸發），所以主要觸發改成外部定時服務（見 README/設定紀錄）
-    # 準時呼叫 workflow_dispatch。這個 schedule 只當備援：萬一外部服務哪天沒打進來，
-    # 至少還有機會在當天稍晚被 GitHub 自己排到，腳本內的等待邏輯一樣會校正到 15:00。
-    # UTC 03:47 = 台灣 11:47
-    - cron: '47 3 * * *'
-
+  # 只由外部定時服務在台灣 15:00 呼叫 workflow_dispatch 觸發。
+  # 原本的 GitHub schedule 備援已移除：它常延遲到 15:00 之後才跑，
+  # 跑起來不會等待而是直接再推一次，造成每天重複推播、吃光 LINE 每月額度。
   workflow_dispatch:
     inputs:
       test_now:

@@ -4,7 +4,7 @@
 
 GitHub Actions 的 schedule 觸發本身不保證準時（實測延遲從幾十分鐘到近 11 小時都有，
 甚至整天直接跳過不觸發），所以主要觸發改用外部定時服務在台灣時間 15:00 準時呼叫
-workflow_dispatch；GitHub 自己的 schedule 只當備援。不管實際是被誰、幾點觸發，
+workflow_dispatch（GitHub schedule 備援已移除，避免重複推播）。不管實際幾點觸發，
 本腳本的 wait_until_target() 都會校正到台灣時間 15:00 整才真正抓資料、推送
 （手動點 Run workflow 測試時，test_now 預設 true 會略過等待，立即執行）。
 
@@ -63,7 +63,6 @@ def http_json(url: str, method: str = "GET", headers: dict | None = None,
 def wait_until_target() -> None:
     """精確等到台灣時間 TARGET_HOUR:TARGET_MINUTE 才返回。
 
-    - schedule 觸發（GitHub 自己的排程，當備援用）→ 一律等待
     - workflow_dispatch 且 TEST_NOW=true（手動點 Run workflow 的預設值）→ 略過等待，方便測試
     - workflow_dispatch 且 TEST_NOW=false（外部定時服務準時呼叫）→ 一樣等待，
       多一層保險：就算外部服務哪天提早呼叫，也不會提早送出不完整的當日資料
